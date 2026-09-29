@@ -20,11 +20,11 @@ type Player struct {
 	mpv Mpv
 	log *log.Logger
 
-	mu      sync.Mutex
-	ctx     context.Context
-	media   *jfin.Media
-	url     string
-	start   time.Time
+	mu    sync.Mutex
+	ctx   context.Context
+	media *jfin.Media
+	url   string
+	start time.Time
 	// Timeline state (upstream names).
 	shouldSendTimeline bool
 	watchedMarked      bool
@@ -37,26 +37,43 @@ type Player struct {
 	pauseIgnore        bool
 	fileErr            bool
 	stopping           bool
-	events             chan string
+	events             chan mpvEvent
+	menu               *menu
+	// last reported pause/mute/volume, to spot remote/UI-visible changes
+	repPause  bool
+	repMute   bool
+	repVolume float64
+	lastTick  time.Time
+}
+
+// mpvEvent is one queued IPC event (the hook runs in the reader goroutine).
+type mpvEvent struct {
+	name string
+	args []string
 }
 
 func New(mpv Mpv, lg *log.Logger) *Player {
 	if lg == nil {
 		lg = log.Default()
 	}
-	return &Player{mpv: mpv, log: lg}
+	p := &Player{mpv: mpv, log: lg}
+	p.menu = newMenu(p)
+	return p
 }
 
 // Start sets the app lifetime ctx and launches the tick + exit watchers.
 func (p *Player) Start(ctx context.Context) {
 	p.mu.Lock()
 	p.ctx = ctx
-	p.events = make(chan string, 16)
+	p.events = make(chan mpvEvent, 16)
 	p.mu.Unlock()
 	p.mpv.SetEventHook(p.handleEvent)
 	go p.tickLoop(ctx)
 	go p.exitWatch(ctx)
 	go p.eventLoop()
+	// Claim our keys as soon as mpv is up (retried on every spawn, since a
+	// crash respawn starts a fresh mpv with no bindings).
+	go p.bindKeysWhenAlive(ctx)
 }
 
 func (p *Player) HasVideo() bool {
@@ -65,9 +82,32 @@ func (p *Player) HasVideo() bool {
 	return p.media != nil
 }
 
+// bindKeysWhenAlive waits for the first mpv spawn and claims the shim's keys.
+// Key bindings do not survive a crash respawn, so re-claim on every new
+// process (incarnation changes when EnsureRunning actually starts mpv).
+func (p *Player) bindKeysWhenAlive(ctx context.Context) {
+	bound := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+		if !p.mpv.Alive() {
+			continue
+		}
+		if id := p.mpv.Incarnation(); id == bound {
+			continue
+		}
+		p.BindKeys()
+		bound = p.mpv.Incarnation()
+	}
+}
+
 // Play loads the media's video into mpv and reports session start.
 // Port of upstream play + _play_media.
 func (p *Player) Play(m *jfin.Media, offset float64) error {
+	p.menu.Hide() // upstream play() hides the menu before loading
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.playLocked(m, offset)
@@ -130,6 +170,7 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 // Stop tears down playback: stop report, mpv stop, transcode teardown.
 // Port of upstream stop().
 func (p *Player) Stop() {
+	p.menu.Hide()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.stopLocked()
@@ -232,6 +273,16 @@ func (p *Player) handleEvent(name string, data json.RawMessage) {
 	// "file_error":...}; older mpv sends a separate file-error event.
 	var failed bool
 	switch name {
+	case "client-message":
+		var args []string
+		if json.Unmarshal(data, &args) != nil {
+			return
+		}
+		select {
+		case p.events <- mpvEvent{name: name, args: args}:
+		default:
+		}
+		return
 	case "file-error":
 		failed = true
 	case "end-file":
@@ -254,14 +305,18 @@ func (p *Player) handleEvent(name string, data json.RawMessage) {
 		name = "file-error"
 	}
 	select {
-	case p.events <- name:
+	case p.events <- mpvEvent{name: name}:
 	default: // queue full: drop (end-file at worst retries on next event)
 	}
 }
 
 func (p *Player) eventLoop() {
-	for name := range p.events {
-		if name == "file-error" {
+	for ev := range p.events {
+		if ev.name == "client-message" {
+			p.handleClientMessage(ev.args)
+			continue
+		}
+		if ev.name == "file-error" {
 			p.mu.Lock()
 			p.fileErr = false
 			p.log.Printf("mpv failed to load media")
@@ -269,6 +324,7 @@ func (p *Player) eventLoop() {
 			p.mu.Unlock()
 			continue
 		}
+		p.menu.Hide() // the queue advanced; the old menu is stale
 		p.mu.Lock()
 		p.handleEndFileLocked()
 		p.mu.Unlock()
@@ -394,7 +450,9 @@ func (p *Player) tickLoop(ctx context.Context) {
 
 // Tick sends a progress report. Port of the upstream timeline loop: it skips
 // while paused (pause reporting arrives with M3's pause echo) and marks the
-// item watched at ≥90%.
+// item watched at ≥90%. It also carries the M3 feedback work upstream did with
+// property observers: pause/mute/volume changes and local seeks are reported
+// so the web UI's remote panel follows mpv.
 func (p *Player) Tick() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -412,13 +470,28 @@ func (p *Player) Tick() {
 		pause, _ = x.(bool)
 	}
 	if pause {
+		// While paused we still report volume/mute changes (the remote can
+		// change them mid-pause); the position does not move.
+		p.lastPause = pause
+		if p.volumeChangedLocked() {
+			p.reportLocked()
+		}
 		return
 	}
+	p.lastPause = pause
 	if x, err := p.mpv.GetProperty("time-pos"); err == nil {
 		if f, ok := x.(float64); ok {
+			// A jump far bigger than a tick's worth of playback is a local
+			// seek: report it right away so the UI seek bar follows (the
+			// normal work below still runs).
+			if !p.lastTick.IsZero() && abs(f-p.lastPos) > 8 {
+				p.lastPos = f
+				p.reportLocked()
+			}
 			p.lastPos = f
 		}
 	}
+	p.lastTick = time.Now()
 	v := p.media.Video
 	if !p.watchedMarked {
 		if dur := v.GetDuration(); dur > 0 && p.lastPos >= 0.9*dur {
@@ -428,10 +501,100 @@ func (p *Player) Tick() {
 			}
 		}
 	}
-	opts := p.timelineOptions(false)
-	if err := v.M.C.SessionProgress(p.ctx, opts); err != nil {
+	p.introCheckLocked()
+	p.reportLocked()
+}
+
+// reportLocked posts progress and remembers the state it reported, so the
+// next Tick can spot changes (upstream's pause/mute de-dupes).
+func (p *Player) reportLocked() {
+	if p.media == nil || !p.shouldSendTimeline {
+		return
+	}
+	if x, err := p.mpv.GetProperty("time-pos"); err == nil {
+		if f, ok := x.(float64); ok {
+			p.lastPos = f
+		}
+	}
+	if x, err := p.mpv.GetProperty("mute"); err == nil {
+		p.repMute, _ = x.(bool)
+	}
+	if x, err := p.mpv.GetProperty("volume"); err == nil {
+		if f, ok := x.(float64); ok {
+			p.repVolume = f
+		}
+	}
+	p.repPause = p.lastPause
+	if err := p.media.C.SessionProgress(p.ctx, p.timelineOptions(false)); err != nil {
 		p.log.Printf("progress: %v", err)
 	}
+}
+
+// volumeChangedLocked reports whether mute or volume moved since the last
+// progress report, so the web UI's sliders follow local/remote changes.
+func (p *Player) volumeChangedLocked() bool {
+	mute := p.repMute
+	if x, err := p.mpv.GetProperty("mute"); err == nil {
+		mute, _ = x.(bool)
+	}
+	vol := p.repVolume
+	if x, err := p.mpv.GetProperty("volume"); err == nil {
+		if f, ok := x.(float64); ok {
+			vol = f
+		}
+	}
+	return mute != p.repMute || int(vol) != int(p.repVolume)
+}
+
+// introCheckLocked implements upstream's skip_intro/skip_credits: seek past
+// the segment once, and prompt ("Seek to Skip Intro") if only the prompt
+// setting applies. ponytail: the settings are single booleans (always-skip
+// vs prompt-only is not distinguished); add flags if that distinction is ever
+// wanted.
+func (p *Player) introCheckLocked() {
+	if p.media == nil || p.aborted() || p.menu.Shown() {
+		return
+	}
+	cfg := p.media.Cfg
+	if !cfg.SkipIntro && !cfg.SkipCredits {
+		return
+	}
+	pos := p.lastPos
+	v := p.media.Video
+	for i := range v.Intros {
+		in := &v.Intros[i]
+		if in.HasTriggered || pos < in.Start || pos > in.End {
+			continue
+		}
+		enabled := in.Type == "Outro" && cfg.SkipCredits
+		if in.Type != "Outro" {
+			enabled = cfg.SkipIntro
+		}
+		if !enabled {
+			continue
+		}
+		in.HasTriggered = true
+		p.log.Printf("skipping %s: seek to %.1fs", in.Type, in.End)
+		if err := p.mpv.Command("seek", in.End, "absolute+exact"); err != nil {
+			p.log.Printf("intro skip: %v", err)
+			return
+		}
+		msg := "Skipped Intro"
+		if in.Type == "Outro" {
+			msg = "Skipped Credits"
+		}
+		p.mpv.ShowText(msg, 3000, 1)
+		p.lastPos = in.End
+		p.sendProgressLocked()
+		return
+	}
+}
+
+func abs(f float64) float64 {
+	if f < 0 {
+		return -f
+	}
+	return f
 }
 
 func (p *Player) waitForDuration(d time.Duration) bool {

@@ -67,21 +67,21 @@ func (p *Player) timelineOptions(finished bool) *jfin.SessionInfo {
 	p.pauseIgnore = pause
 
 	info := &jfin.SessionInfo{
-		ItemID:                   v.ID,
-		MediaSourceID:            v.MediaSource.ID,
-		PlaySessionID:            v.PlaybackInfo.PlaySessionId,
-		PlaylistItemID:           m.Queue[m.Seq].PlaylistItemId,
-		PlayMethod:               "DirectPlay",
-		CanSeek:                  true,
-		IsPaused:                 pause,
-		IsMuted:                  mute,
-		VolumeLevel:              int(volume),
-		PositionTicks:            int64(safePos * 1e7),
-		PlaybackStartTimeTicks:   p.start.Unix() * 1e7,
-		SubtitleStreamIndex:      -1,
-		AudioStreamIndex:         -1,
-		RepeatMode:               "RepeatNone",
-		NowPlayingQueue:          m.Queue,
+		ItemID:                 v.ID,
+		MediaSourceID:          v.MediaSource.ID,
+		PlaySessionID:          v.PlaybackInfo.PlaySessionId,
+		PlaylistItemID:         m.Queue[m.Seq].PlaylistItemId,
+		PlayMethod:             "DirectPlay",
+		CanSeek:                true,
+		IsPaused:               pause,
+		IsMuted:                mute,
+		VolumeLevel:            int(volume),
+		PositionTicks:          int64(safePos * 1e7),
+		PlaybackStartTimeTicks: p.start.Unix() * 1e7,
+		SubtitleStreamIndex:    -1,
+		AudioStreamIndex:       -1,
+		RepeatMode:             "RepeatNone",
+		NowPlayingQueue:        m.Queue,
 	}
 	if v.IsTranscode {
 		info.PlayMethod = "Transcode"
@@ -125,4 +125,3 @@ func (p *Player) sendStopped(finished bool) {
 		p.log.Printf("session stopped: %v", err)
 	}
 }
-

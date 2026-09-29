@@ -3,10 +3,12 @@ package player
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,14 +19,18 @@ import (
 
 // fakeMpv implements Mpv in memory.
 type fakeMpv struct {
-	mu       sync.Mutex
-	props    map[string]any
-	alive    bool
-	graceful bool
-	loads    []string
-	hookFn   func(string, json.RawMessage)
-	exit     chan struct{}
-	stopped  int
+	mu          sync.Mutex
+	props       map[string]any
+	alive       bool
+	graceful    bool
+	loads       []string
+	texts       []string
+	binds       []string
+	cmds        []string
+	incarnation int
+	hookFn      func(string, json.RawMessage)
+	exit        chan struct{}
+	stopped     int
 }
 
 func newFakeMpv() *fakeMpv {
@@ -53,6 +59,17 @@ func (f *fakeMpv) Stop() error {
 }
 func (f *fakeMpv) SetProperty(n string, v any) {
 	f.mu.Lock()
+	// mpv's IPC returns numbers as float64; mirror that.
+	switch t := v.(type) {
+	case int:
+		v = float64(t)
+	case string:
+		if n == "volume" || n == "osd-font-size" {
+			if fv, err := strconv.ParseFloat(t, 64); err == nil {
+				v = fv
+			}
+		}
+	}
 	f.props[n] = v
 	f.mu.Unlock()
 }
@@ -67,7 +84,37 @@ func (f *fakeMpv) SubAdd(u string) error {
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeMpv) ShowText(text string, ms, level int) {}
+func (f *fakeMpv) ShowText(text string, ms, level int) {
+	f.mu.Lock()
+	f.texts = append(f.texts, text)
+	f.mu.Unlock()
+}
+func (f *fakeMpv) Keybind(key, cmd string) {
+	f.mu.Lock()
+	f.binds = append(f.binds, key+"="+cmd)
+	f.mu.Unlock()
+}
+func (f *fakeMpv) Command(args ...any) error {
+	f.mu.Lock()
+	f.cmds = append(f.cmds, fmt.Sprint(args...))
+	// Mirror mpv: after a seek, time-pos reflects the new position.
+	if len(args) >= 3 && fmt.Sprint(args[0]) == "seek" {
+		to, _ := args[1].(float64)
+		cur, _ := f.props["time-pos"].(float64)
+		if fmt.Sprint(args[2]) == "absolute" || fmt.Sprint(args[2]) == "absolute+exact" {
+			f.props["time-pos"] = to
+		} else {
+			f.props["time-pos"] = cur + to
+		}
+	}
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeMpv) Incarnation() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.incarnation
+}
 func (f *fakeMpv) Alive() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -97,13 +144,18 @@ func (f *fakeMpv) Kill() {
 }
 
 // test helpers
-func (f *fakeMpv) fire(name string) {
+func (f *fakeMpv) fire(name string, args ...any) {
 	f.mu.Lock()
 	h := f.hookFn
 	f.mu.Unlock()
-	if h != nil {
-		h(name, nil)
+	if h == nil {
+		return
 	}
+	var data json.RawMessage
+	if len(args) > 0 {
+		data, _ = json.Marshal(args[0])
+	}
+	h(name, data)
 }
 func (f *fakeMpv) crash() {
 	f.mu.Lock()
@@ -118,6 +170,16 @@ func (f *fakeMpv) numLoads() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.loads)
+}
+
+// lastText returns the most recent OSD text (menu rendering).
+func (f *fakeMpv) lastText() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.texts) == 0 {
+		return ""
+	}
+	return f.texts[len(f.texts)-1]
 }
 
 type recs struct {
@@ -139,12 +201,15 @@ func (r *recs) snapshot() (p, pr, s []jfin.SessionInfo, w []string) {
 
 func testSource() jfin.MediaSource {
 	return jfin.MediaSource{
-		ID: "src1", Protocol: "Http", Bitrate: 100000,
+		ID: "src1", Protocol: "File", Bitrate: 100000,
 		SupportsDirectPlay: true, SupportsDirectStream: true, SupportsTranscoding: true,
 		MediaStreams: []jfin.MediaStream{
 			{Type: "Video", Index: 0},
-			{Type: "Audio", Index: 1, Language: "eng"},
-			{Type: "Subtitle", Index: 2, Language: "eng"},
+			{Type: "Audio", Index: 1, Language: "eng", Title: "English"},
+			{Type: "Subtitle", Index: 2, Language: "eng", Title: "English", DeliveryMethod: "Embed"},
+			{Type: "Audio", Index: 3, Language: "spa", Title: "Spanish"},
+			{Type: "Subtitle", Index: 4, Language: "eng", Title: "English (ext)", IsExternal: true,
+				DeliveryMethod: "External", DeliveryUrl: "/Videos/a/Subtitles/4/Stream.vtt"},
 		},
 	}
 }
@@ -195,6 +260,12 @@ func testServer(t *testing.T, r *recs) *httptest.Server {
 			r.watched = append(r.watched, id)
 			r.mu.Unlock()
 			w.WriteHeader(204)
+		case p == "/MediaSegments/src1":
+			_ = json.NewEncoder(w).Encode(struct {
+				Items []jfin.MediaSegment `json:"Items"`
+			}{Items: []jfin.MediaSegment{
+				{Type: "Intro", StartTicks: 0, EndTicks: 30 * 1e7},
+			}})
 		case p == "/Videos/ActiveEncodings":
 			w.WriteHeader(204)
 		default:
@@ -400,3 +471,206 @@ func TestCrashRestart(t *testing.T) {
 	}
 }
 
+// --- M3: remote control + OSD menu ---
+
+// playOne starts playback of item "a" and waits for the session start report.
+func playOne(t *testing.T, h *harness, c jfin.MediaConfig) *jfin.Media {
+	t.Helper()
+	m, err := jfin.NewMedia(context.Background(), h.c, c, []string{"a"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	waitFor(t, "session start", func() bool {
+		p, _, _, _ := h.recs.snapshot()
+		return len(p) == 1
+	})
+	return m
+}
+
+func (f *fakeMpv) prop(name string) any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.props[name]
+}
+
+func (f *fakeMpv) numCmds() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.cmds)
+}
+
+func TestRemoteVolumeMutePauseSeek(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	// Volume: the server spams SetVolume, so an unchanged value must not
+	// produce a second report (upstream's de-dupe).
+	h.fm.SetProperty("volume", 100.0)
+	h.pl.SetVolume(50)
+	waitFor(t, "volume report", func() bool { return h.pl.GetVolume() == 50 })
+	_, pr0, _, _ := h.recs.snapshot()
+	n := len(pr0)
+	h.pl.SetVolume(50)
+	time.Sleep(50 * time.Millisecond)
+	_, pr1, _, _ := h.recs.snapshot()
+	if len(pr1) != n {
+		t.Errorf("unchanged SetVolume reported again (%d → %d)", n, len(pr1))
+	}
+	if pr0[n-1].VolumeLevel != 50 {
+		t.Errorf("reported volume = %d, want 50", pr0[n-1].VolumeLevel)
+	}
+
+	// Mute.
+	h.pl.SetMute(true)
+	waitFor(t, "mute report", func() bool {
+		_, pr, _, _ := h.recs.snapshot()
+		return pr[len(pr)-1].IsMuted
+	})
+
+	// Pause toggles the mpv property and reports the paused state.
+	h.pl.TogglePause()
+	waitFor(t, "pause report", func() bool {
+		_, pr, _, _ := h.recs.snapshot()
+		return pr[len(pr)-1].IsPaused
+	})
+	if h.fm.prop("pause") != true {
+		t.Errorf("mpv pause = %v, want true", h.fm.prop("pause"))
+	}
+	h.pl.TogglePause()
+	if h.fm.prop("pause") != false {
+		t.Errorf("mpv pause = %v, want false", h.fm.prop("pause"))
+	}
+
+	// Seek: absolute, reported at the new position.
+	h.pl.Seek(42, true)
+	waitFor(t, "seek report", func() bool {
+		_, pr, _, _ := h.recs.snapshot()
+		return pr[len(pr)-1].PositionTicks == 42*1e7
+	})
+}
+
+func TestMenuOpenNavigateSelectAudio(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	h.pl.Key("menu")
+	if !h.pl.menu.Shown() {
+		t.Fatal("menu not shown after 'c'")
+	}
+	if got := h.fm.lastText(); !strings.Contains(got, "Change Audio") || !strings.Contains(got, "Close Menu") {
+		t.Errorf("root menu text = %q", got)
+	}
+	if h.fm.prop("osd-border-style") != "background-box" {
+		t.Errorf("osd-border-style = %v, want background-box", h.fm.prop("osd-border-style"))
+	}
+	if h.fm.prop("pause") != true {
+		t.Error("menu should pause playback")
+	}
+
+	// Down to "Change Audio" (index 0 → wrapped selection) and open it.
+	h.pl.Key("ok")
+	if got := h.fm.lastText(); !strings.Contains(got, "Select Audio Track") {
+		t.Fatalf("audio menu text = %q", got)
+	}
+	// Pick the second audio track (Jellyfin index 3 → mpv id 2).
+	h.pl.Key("down")
+	h.pl.Key("ok")
+	if got := fmt.Sprint(h.fm.prop("audio")); got != "2" {
+		t.Errorf("mpv audio = %v, want 2", got)
+	}
+	if got := h.fm.lastText(); !strings.Contains(got, "Main Menu") {
+		t.Errorf("after select, expected the root menu, got %q", got)
+	}
+
+	// Back at the root, "back" closes and restores OSD.
+	h.pl.Key("back")
+	if h.pl.menu.Shown() {
+		t.Error("menu still shown after 'back' from the root")
+	}
+	if h.fm.prop("osd-border-style") == "background-box" {
+		t.Error("osd-border-style not restored")
+	}
+}
+
+func TestMenuSubtitleExternal(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	h.pl.Key("menu")
+	h.pl.Key("down") // Change Subtitles
+	h.pl.Key("ok")
+	if got := h.fm.lastText(); !strings.Contains(got, "Select Subtitle Track") {
+		t.Fatalf("subtitle menu text = %q", got)
+	}
+	// Entries: None, embedded (2), external (4).
+	h.pl.Key("down")
+	h.pl.Key("down")
+	h.pl.Key("ok")
+	if got, _ := h.fm.prop("sub-add").(string); !strings.Contains(got, "Subtitles/4/Stream.vtt") {
+		t.Errorf("sub-add = %v, want the external subtitle URL", got)
+	}
+}
+
+func TestKeyFallbackSeekWhenMenuClosed(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.fm.SetProperty("time-pos", 10.0)
+
+	before := h.fm.numCmds()
+	h.pl.Key("right") // menu closed → +5 s relative seek
+	h.pl.Key("up")    // +60 s
+	if h.fm.numCmds() != before+2 {
+		t.Fatalf("expected 2 seek commands, got %d", h.fm.numCmds()-before)
+	}
+	h.fm.mu.Lock()
+	got := strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if !strings.Contains(got, "15") || !strings.Contains(got, "85") {
+		t.Errorf("seek commands = %q, want relative seeks to 15 and 85", got)
+	}
+}
+
+func TestIntroSkipOnce(t *testing.T) {
+	h := setup(t)
+	c := cfg()
+	c.SkipIntro = true
+	playOne(t, h, c)
+
+	h.fm.SetProperty("time-pos", 5.0)
+	before := h.fm.numCmds()
+	h.pl.Tick()
+	h.fm.mu.Lock()
+	got := strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if !strings.Contains(got, "30") || !strings.Contains(got, "absolute") {
+		t.Errorf("expected a seek to the intro end (30), got %q", got)
+	}
+	if txt := h.fm.lastText(); txt != "Skipped Intro" {
+		t.Errorf("OSD text = %q, want %q", txt, "Skipped Intro")
+	}
+	// Triggered once only.
+	before = h.fm.numCmds()
+	h.fm.SetProperty("time-pos", 6.0)
+	h.pl.Tick()
+	if h.fm.numCmds() != before {
+		t.Error("intro skip repeated after HasTriggered")
+	}
+}
+
+// The mpv keybindings speak through client-message; check the routing.
+func TestClientMessageOpensMenu(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.fm.fire("client-message", []string{"shim-menu", "menu"})
+	waitFor(t, "menu open", func() bool { return h.pl.menu.Shown() })
+	if h.fm.prop("osd-border-style") != "background-box" {
+		t.Error("menu did not apply the OSD box style")
+	}
+	h.fm.fire("client-message", []string{"other-script", "menu"})
+	if !h.pl.menu.Shown() {
+		t.Error("unrelated client-message closed/ignored the menu unexpectedly")
+	}
+}

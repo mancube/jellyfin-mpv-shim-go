@@ -241,10 +241,16 @@ func runSession(s *Settings, a jfin.Account) int {
 				pr = jfin.PlayRequest{PlayCommand: d.Name, ItemIDs: args.ItemIDs}
 			}
 		default:
-			return // SetVolume, navigation, ... — M3
+			// Everything else is remote control of the current playback.
+			// Not blocking the WS read loop: menu actions do IPC round-trips.
+			go handleGeneralCommand(pl, d.Name, d.Arguments)
+			return
 		}
 		b, _ := json.Marshal(pr)
 		go handlePlay(ctx, client, pl, mcfg, b)
+	})
+	ws.On("Playstate", func(ctx context.Context, data json.RawMessage) {
+		go handlePlaystate(pl, data)
 	})
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -301,6 +307,91 @@ func handlePlay(ctx context.Context, client *jfin.Client, pl *player.Player, cfg
 		pl.InsertQueue(d.ItemIDs, true)
 	default:
 		log.Printf("play: unknown command %q", cmd)
+	}
+}
+
+// handlePlaystate is the WS "Playstate" event: the transport controls
+// (play/pause, seek, next/prev, stop). Port of upstream
+// event_handler.play_state.
+func handlePlaystate(pl *player.Player, data json.RawMessage) {
+	var d struct {
+		Command           string `json:"Command"`
+		SeekPositionTicks *int64 `json:"SeekPositionTicks"`
+	}
+	if json.Unmarshal(data, &d) != nil {
+		return
+	}
+	switch d.Command {
+	case "PlayPause":
+		pl.TogglePause()
+	case "Pause":
+		pl.SetPaused(true)
+	case "Unpause":
+		pl.SetPaused(false)
+	case "PreviousTrack":
+		pl.Prev()
+	case "NextTrack":
+		pl.Next()
+	case "Stop":
+		pl.Stop()
+	case "Seek":
+		if d.SeekPositionTicks != nil {
+			pl.Seek(float64(*d.SeekPositionTicks)/1e7, true)
+		}
+	default:
+		log.Printf("playstate: unknown command %q", d.Command)
+	}
+}
+
+// navigation maps the remote's navigation commands to shim key actions
+// (upstream event_handler.NAVIGATION_DICT).
+var navigation = map[string]string{
+	"Back":         "back",
+	"Select":       "ok",
+	"MoveUp":       "up",
+	"MoveDown":     "down",
+	"MoveRight":    "right",
+	"MoveLeft":     "left",
+	"GoHome":       "home",
+	"GoToSettings": "home",
+}
+
+// handleGeneralCommand is the WS "GeneralCommand" remote-control surface:
+// volume, mute, track selection, fullscreen and menu navigation. Port of
+// upstream event_handler.general_command.
+func handleGeneralCommand(pl *player.Player, name string, args json.RawMessage) {
+	if action, ok := navigation[name]; ok {
+		pl.Key(action)
+		return
+	}
+	var a struct {
+		Volume *int `json:"Volume"`
+		Index  *int `json:"Index"`
+	}
+	_ = json.Unmarshal(args, &a)
+	switch name {
+	case "SetVolume":
+		if a.Volume != nil {
+			pl.SetVolume(*a.Volume)
+		}
+	case "Mute":
+		pl.SetMute(true)
+	case "Unmute":
+		pl.SetMute(false)
+	case "SetAudioStreamIndex":
+		if a.Index != nil {
+			pl.SetStreams(a.Index, nil)
+		}
+	case "SetSubtitleStreamIndex":
+		if a.Index != nil {
+			pl.SetStreams(nil, a.Index)
+		}
+	case "ToggleFullscreen", "":
+		pl.ToggleFullscreen()
+	case "DisplayContent":
+		// Nothing to mirror (out of scope); ignore.
+	default:
+		log.Printf("general command: unhandled %q", name)
 	}
 }
 

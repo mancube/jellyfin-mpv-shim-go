@@ -67,6 +67,14 @@ func NewMedia(ctx context.Context, c *Client, cfg MediaConfig, itemIDs []string,
 func (m *Media) HasNext() bool { return m.Seq < len(m.Queue)-1 }
 func (m *Media) HasPrev() bool { return m.Seq > 0 }
 
+// At returns the queue entry at seq (its Video is fetched on demand).
+func (m *Media) At(ctx context.Context, seq int) (*Media, error) {
+	if seq < 0 || seq >= len(m.Queue) {
+		return nil, nil
+	}
+	return m.at(ctx, seq)
+}
+
 func (m *Media) at(ctx context.Context, seq int) (*Media, error) {
 	v, err := NewVideo(ctx, m, m.Queue[seq].ID, nil, nil, nil)
 	if err != nil {
@@ -123,14 +131,14 @@ func (m *Media) Insert(ids []string, atEnd bool) {
 // Video is one item: fetched metadata + the playback decision state
 // (media source, URL kind, stream maps). Port of upstream media.Video.
 type Video struct {
-	M         *Media
-	ID        string
-	Aid       *int // requested/active audio stream (Jellyfin index), nil = default
-	Sid       *int // requested/active subtitle stream (Jellyfin index)
-	SrcID     *string
-	Item      *Item
-	IsTV      bool
-	IsTranscode bool
+	M            *Media
+	ID           string
+	Aid          *int // requested/active audio stream (Jellyfin index), nil = default
+	Sid          *int // requested/active subtitle stream (Jellyfin index)
+	SrcID        *string
+	Item         *Item
+	IsTV         bool
+	IsTranscode  bool
 	PlaybackInfo *PlaybackInfo
 	MediaSource  *MediaSource
 	// Track maps: Jellyfin stream index → mpv track index (and back).
@@ -538,4 +546,3 @@ func (c *Client) IsLocal(ctx context.Context) bool {
 	}
 	return false
 }
-

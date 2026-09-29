@@ -30,7 +30,10 @@ type Mpv interface {
 	GetProperty(name string) (any, error)
 	SubAdd(url string) error
 	ShowText(text string, ms, level int)
+	Keybind(key, cmd string) // bind a key to an mpv command ("" unbinds)
+	Command(args ...any) error
 	Alive() bool
+	Incarnation() int // spawn counter: changes when mpv (re)started
 	Graceful() bool
 	Exit() <-chan struct{}
 	SetEventHook(func(name string, data json.RawMessage))
@@ -50,6 +53,7 @@ type ProcOpts struct {
 type rpcMsg struct {
 	Event     string          `json:"event"`
 	Data      json.RawMessage `json:"data"`
+	Args      []string        `json:"args"` // client-message payload
 	RequestID *int64          `json:"request_id"`
 	Error     json.RawMessage `json:"error"`
 }
@@ -65,19 +69,19 @@ type Proc struct {
 	mediaKeys  bool
 	log        *log.Logger
 
-	spawnMu  sync.Mutex // serializes respawns
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	conn     net.Conn
-	r        *bufio.Reader
-	wmu      sync.Mutex // serializes writes to conn
+	spawnMu     sync.Mutex // serializes respawns
+	mu          sync.Mutex
+	cmd         *exec.Cmd
+	conn        net.Conn
+	r           *bufio.Reader
+	wmu         sync.Mutex // serializes writes to conn
 	pending     map[int64]chan *rpcMsg
 	nextID      int64
 	death       chan struct{} // stable; monitor sends a token per death
 	incarnation int
 	graceful    bool
-	hook     func(name string, data json.RawMessage)
-	dead     bool // Kill() called: never spawn again
+	hook        func(name string, data json.RawMessage)
+	dead        bool // Kill() called: never spawn again
 }
 
 func NewProc(o ProcOpts) *Proc {
@@ -103,6 +107,12 @@ func (p *Proc) Alive() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.conn != nil
+}
+
+func (p *Proc) Incarnation() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.incarnation
 }
 
 func (p *Proc) Graceful() bool {
@@ -140,7 +150,7 @@ func (p *Proc) spawn(ctx context.Context) error {
 	_ = os.Remove(sock)
 	args := []string{
 		"--no-terminal",
-		"--idle", // stay alive until the first loadfile; empty playlist would exit
+		"--idle",                     // stay alive until the first loadfile; empty playlist would exit
 		"--input-ipc-server=" + sock, // bare path; mpv v0.41 rejects unix: prefix
 	}
 	if p.cfgDir != "" {
@@ -287,6 +297,12 @@ func (p *Proc) readLoop() {
 						ch <- &m
 					}
 				} else if m.Event != "" {
+					data := m.Data
+					if len(m.Args) > 0 {
+						// client-message carries "args", not "data".
+						b, _ := json.Marshal(m.Args)
+						data = b
+					}
 					if m.Event == "shutdown" {
 						p.mu.Lock()
 						p.graceful = true
@@ -296,7 +312,7 @@ func (p *Proc) readLoop() {
 					hook := p.hook
 					p.mu.Unlock()
 					if hook != nil {
-						hook(m.Event, m.Data)
+						hook(m.Event, data)
 					}
 				}
 			}
@@ -413,6 +429,21 @@ func (p *Proc) ShowText(text string, ms, level int) {
 	if _, err := p.command("show-text", text, ms, level); err != nil {
 		p.log.Printf("mpv: show-text: %v", err)
 	}
+}
+
+// Keybind binds a key (input.conf naming: "c", "up", "escape") to a complete
+// mpv command; an empty cmd removes it. This is mpv's documented client-API
+// way to claim keys (upstream does the same via python-mpv's on_key_press).
+func (p *Proc) Keybind(key, cmd string) {
+	if _, err := p.command("keybind", key, cmd); err != nil {
+		p.log.Printf("mpv: keybind %s: %v", key, err)
+	}
+}
+
+// Command runs a raw mpv IPC command.
+func (p *Proc) Command(args ...any) error {
+	_, err := p.command(args...)
+	return err
 }
 
 // Kill terminates the process: SIGTERM, escalating to SIGKILL after 3s.

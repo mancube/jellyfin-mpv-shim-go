@@ -31,7 +31,7 @@ func (m *minimalMvp) LoadFile(ctx context.Context, u string) error {
 	m.mu.Unlock()
 	return nil
 }
-func (m *minimalMvp) Stop() error             { return nil }
+func (m *minimalMvp) Stop() error { return nil }
 func (m *minimalMvp) SetProperty(n string, v any) {
 	m.mu.Lock()
 	m.props[n] = v
@@ -42,10 +42,13 @@ func (m *minimalMvp) GetProperty(n string) (any, error) {
 	defer m.mu.Unlock()
 	return m.props[n], nil
 }
-func (m *minimalMvp) SubAdd(u string) error { return nil }
+func (m *minimalMvp) SubAdd(u string) error     { return nil }
+func (m *minimalMvp) Keybind(key, cmd string)   {}
+func (m *minimalMvp) Command(args ...any) error { return nil }
+func (m *minimalMvp) Incarnation() int          { return 1 }
 func (m *minimalMvp) ShowText(t string, ms, level int) {
 }
-func (m *minimalMvp) Alive() bool   { return true }
+func (m *minimalMvp) Alive() bool { return true }
 func (m *minimalMvp) Graceful() bool {
 	return false
 }
@@ -149,4 +152,56 @@ func (m *minimalMvp) lastURL() string {
 		return ""
 	}
 	return m.urls[len(m.urls)-1]
+}
+
+// --- M3: remote control routing ---
+
+func TestHandlePlaystateAndGeneralCommand(t *testing.T) {
+	ts := playServer(t)
+	c := jfin.New(ts.URL, "test", "dev1", "1.0", false)
+	c.Token, c.UserID = "tok", "u"
+	mvp := newMinimalMvp()
+	pl := player.New(mvp, log.New(io.Discard, "", 0))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pl.Start(ctx)
+	handlePlay(ctx, c, pl, jfin.MediaConfig{LocalKbps: 10000, RemoteKbps: 25000}, playData(t, "PlayNow", "a"))
+	if !pl.HasVideo() {
+		t.Fatal("no video after PlayNow")
+	}
+
+	// Playstate: pause, unpause, seek.
+	handlePlaystate(pl, json.RawMessage(`{"Command":"Pause"}`))
+	if mvp.props["pause"] != true {
+		t.Errorf("pause = %v, want true", mvp.props["pause"])
+	}
+	handlePlaystate(pl, json.RawMessage(`{"Command":"Unpause"}`))
+	if mvp.props["pause"] != false {
+		t.Errorf("pause = %v, want false", mvp.props["pause"])
+	}
+	handlePlaystate(pl, json.RawMessage(`{"Command":"Seek","SeekPositionTicks":300000000}`))
+
+	// GeneralCommand: volume, mute, navigation (opens the OSD menu).
+	handleGeneralCommand(pl, "SetVolume", json.RawMessage(`{"Volume":42}`))
+	if got := mvp.props["volume"]; got != 42 {
+		t.Errorf("volume = %v, want 42", got)
+	}
+	handleGeneralCommand(pl, "Mute", json.RawMessage(`{}`))
+	if mvp.props["mute"] != true {
+		t.Errorf("mute = %v, want true", mvp.props["mute"])
+	}
+	handleGeneralCommand(pl, "GoHome", json.RawMessage(`{}`))
+	if mvp.props["osd-border-style"] != "background-box" {
+		t.Error("GoHome did not open the OSD menu")
+	}
+	handleGeneralCommand(pl, "Back", json.RawMessage(`{}`))
+	if mvp.props["osd-border-style"] == "background-box" {
+		t.Error("Back did not close the OSD menu")
+	}
+
+	// Stop via Playstate tears playback down.
+	handlePlaystate(pl, json.RawMessage(`{"Command":"Stop"}`))
+	if pl.HasVideo() {
+		t.Error("still playing after Stop")
+	}
 }
