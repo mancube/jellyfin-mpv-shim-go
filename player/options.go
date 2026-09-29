@@ -42,6 +42,7 @@ type Options struct {
 	SkipCredits          bool
 	SkipCreditsAlways    bool
 	MenuMouse            bool
+	RememberVolume       bool
 	WriteLogs            bool
 	CheckUpdates         bool
 	TranscodeHi10p       bool
@@ -74,6 +75,7 @@ func DefaultOptions() Options {
 		SkipIntro:       true,
 		SkipCredits:     true,
 		MenuMouse:       true,
+		RememberVolume:  true,
 		SubSize:         100,
 		SubColor:        "#FFFFFFFF",
 		SubPosition:     "bottom",

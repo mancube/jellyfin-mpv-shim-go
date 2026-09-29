@@ -175,8 +175,8 @@ terminal.
 
 The OSD menu also has **Video Preferences** and **Player Preferences**
 sub-menus (transcode quality, subtitle size/colour/position, HDR/Hi10p/DVR
-toggles, auto-play, fullscreen, OSC, intro skipping …). Changes apply
-immediately and are written back to `config.json`.
+toggles, auto-play, fullscreen, OSC, mouse menu, *remember volume*, intro
+skipping …). Changes apply immediately and are written back to `config.json`.
 
 ### Tray menu
 
@@ -209,6 +209,8 @@ dot: green connected, amber reconnecting, grey offline.
 | `log_level` | `info` | mpv `--msg-level` (quiet/error/warn/info/debug) |
 | `write_log` | false | also append to `<config dir>/mpv-shim.log` |
 | `media_keys` | true | let mpv handle media keys |
+| `remember_volume` | true | restore the volume you last used at the next playback start |
+| `last_volume` | — | written automatically (0 = nothing remembered yet) |
 | `key_bindings` | upstream defaults | `{"<mpv key>": "<action>"}`; `""` unbinds a key |
 | `seek_up` / `seek_down` | 60 / -60 | arrow-key seek steps (seconds) |
 | `seek_left` / `seek_right` | -5 / 5 | horizontal seek steps |

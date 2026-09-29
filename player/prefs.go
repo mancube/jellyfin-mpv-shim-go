@@ -93,6 +93,7 @@ func (m *menu) playerPrefsEntries() []menuEntry {
 		m.toggle("Always Skip Credits", o.SkipCreditsAlways, m.setSkipCreditsAlways),
 		m.toggle("Ask to Skip Credits", o.SkipCredits, m.setSkipCreditsAsk),
 		m.toggle("Mouse Menu", o.MenuMouse, m.setMenuMouse),
+		m.toggle("Remember Volume", o.RememberVolume, m.setRememberVolume),
 	}
 	return entries
 }
@@ -300,6 +301,10 @@ func (m *menu) setDirectPaths(v bool) {
 }
 func (m *menu) setMenuMouse(v bool) {
 	m.setBool(func(o *Options, val bool) { o.MenuMouse = val }, nil)(v)
+}
+
+func (m *menu) setRememberVolume(v bool) {
+	m.setBool(func(o *Options, val bool) { o.RememberVolume = val }, nil)(v)
 }
 
 // setEnableOSC also applies the change to the running player.

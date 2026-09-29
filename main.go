@@ -233,6 +233,8 @@ type session struct {
 
 	mu     sync.Mutex // guards cancel (start/disconnect)
 	cancel context.CancelFunc
+
+	flushVolume func() // persist a pending volume change at shutdown
 }
 
 // newSession wires the client, mpv, player and WS event handlers.
@@ -278,6 +280,61 @@ func mediaConfigLocked(s *Settings) jfin.MediaConfig {
 	}
 }
 
+// volumeGetter returns the volume to restore at the next playback start, or 0.
+// Reads under settingsMu: the preference menu can flip the toggle.
+func volumeGetter(s *Settings) func() int {
+	return func() int {
+		settingsMu.Lock()
+		defer settingsMu.Unlock()
+		if !s.RememberVolume {
+			return 0
+		}
+		return s.LastVolume
+	}
+}
+
+// volumeSetter remembers a new volume. Writes are coalesced: a slider drag
+// produces many events and config.json is only rewritten every few seconds
+// (plus once on shutdown).
+func volumeSetter(s *Settings, cfgPath string, lg *log.Logger) (set func(int), flush func()) {
+	var (
+		mu      sync.Mutex
+		pending int
+		dirty   bool
+	)
+	flush = func() {
+		mu.Lock()
+		vol, ok := pending, dirty
+		pending, dirty = 0, false
+		mu.Unlock()
+		if !ok {
+			return
+		}
+		settingsMu.Lock()
+		s.LastVolume = vol
+		err := s.Save(cfgPath)
+		settingsMu.Unlock()
+		if err != nil {
+			lg.Printf("saving volume: %v", err)
+		}
+	}
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			flush()
+		}
+	}()
+	return func(vol int) {
+		if vol < 0 || vol > 100 {
+			return
+		}
+		mu.Lock()
+		pending, dirty = vol, true
+		mu.Unlock()
+	}, flush
+}
+
 // applyAndSave persists a preference-menu change atomically.
 func applyAndSave(s *Settings, o player.Options, cfgPath string) error {
 	settingsMu.Lock()
@@ -310,6 +367,7 @@ func playerOptionsLocked(s *Settings) player.Options {
 	o.SkipIntro, o.SkipCredits = s.SkipIntro, s.SkipCredits
 	o.SkipIntroAlways, o.SkipCreditsAlways = s.SkipIntroAlways, s.SkipCreditsAlways
 	o.MenuMouse, o.WriteLogs, o.CheckUpdates = s.MenuMouse, s.WriteLog, s.CheckUpdates
+	o.RememberVolume = s.RememberVolume
 	o.TranscodeHi10p, o.TranscodeHDR, o.TranscodeDolbyVision = s.TranscodeHi10p, s.TranscodeHDR, s.TranscodeDolbyVision
 	o.DirectPaths, o.RemoteDirectPaths = s.DirectPaths, s.RemoteDirectPaths
 	o.ShellCmds = player.ShellCmds{
@@ -333,6 +391,7 @@ func applyOptionsToSettings(s *Settings, o player.Options) {
 	s.SkipIntro, s.SkipIntroAlways = o.SkipIntro, o.SkipIntroAlways
 	s.SkipCredits, s.SkipCreditsAlways = o.SkipCredits, o.SkipCreditsAlways
 	s.MenuMouse, s.WriteLog, s.CheckUpdates = o.MenuMouse, o.WriteLogs, o.CheckUpdates
+	s.RememberVolume = o.RememberVolume
 	s.TranscodeHi10p, s.TranscodeHDR = o.TranscodeHi10p, o.TranscodeHDR
 	s.TranscodeDolbyVision = o.TranscodeDolbyVision
 	s.DirectPaths, s.RemoteDirectPaths = o.DirectPaths, o.RemoteDirectPaths
@@ -363,6 +422,8 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	})
 	pl := player.New(proc, lg)
 	pl.SetOptions(playerOptions(s))
+	setVolume, flushVolume := volumeSetter(s, cfgPath, lg)
+	pl.SetVolumeMemory(volumeGetter(s), setVolume)
 	pl.SetVersion(version)
 	// Our own release feed, never upstream's: this is the Go rewrite and must
 	// not report the Python shim's versions. Override with `update_url`.
@@ -455,7 +516,10 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 		go handlePlaystate(pl, data)
 	})
 
-	return &session{account: a, client: client, proc: proc, pl: pl, ws: ws, logs: logs, ipcDir: ipcDir, lg: lg}, nil
+	return &session{
+		account: a, client: client, proc: proc, pl: pl, ws: ws, logs: logs,
+		ipcDir: ipcDir, lg: lg, flushVolume: flushVolume,
+	}, nil
 }
 
 // start launches the /socket loop in the background. It can be stopped with
@@ -498,6 +562,9 @@ func (sess *session) connected() bool { return sess.ws.Connected() }
 // shutdown is the app-exit path: stop the socket loop, tear playback down and
 // kill mpv (upstream mpv_shim.py shutdown order).
 func (sess *session) shutdown(ctx context.Context) {
+	if sess.flushVolume != nil {
+		sess.flushVolume() // do not lose the last volume change
+	}
 	sess.disconnect()
 	sess.pl.Shutdown()
 	_ = os.RemoveAll(sess.ipcDir)

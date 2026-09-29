@@ -1731,3 +1731,89 @@ func TestMenuMouseToggleUsesClientMessage(t *testing.T) {
 		t.Errorf("mouse script toggled although menu_mouse is off: %q", cmds)
 	}
 }
+
+// replay plays the same item again in the same harness.
+func replay(t *testing.T, h *harness) {
+	t.Helper()
+	m, err := jfin.NewMedia(context.Background(), h.c, cfg(), []string{"a"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+}
+
+// Volume memory: the remembered volume is applied to a new playback, changes
+// are reported back, and switching the setting off stops both.
+func TestRememberVolume(t *testing.T) {
+	h := setup(t)
+	// The callback runs on the event-loop goroutine; guard the test's copy.
+	var mu sync.Mutex
+	var remembered, last int
+	h.pl.SetVolumeMemory(
+		func() int { mu.Lock(); defer mu.Unlock(); return remembered },
+		func(v int) { mu.Lock(); last = v; mu.Unlock() },
+	)
+	lastSeen := func() int { mu.Lock(); defer mu.Unlock(); return last }
+	setRemembered := func(v int) { mu.Lock(); remembered = v; mu.Unlock() }
+
+	// Nothing remembered yet: mpv keeps its own volume.
+	playOne(t, h, cfg())
+	if h.fm.prop("volume") != nil {
+		t.Errorf("volume set without a remembered value: %v", h.fm.prop("volume"))
+	}
+
+	// A remote volume change is reported to the app.
+	h.fm.SetProperty("volume", 100.0)
+	h.pl.SetVolume(35)
+	if got := lastSeen(); got != 35 {
+		t.Errorf("reported volume = %d, want 35", got)
+	}
+
+	// The next playback restores it.
+	setRemembered(35)
+	replay(t, h)
+	if got := h.fm.prop("volume"); got != float64(35) {
+		t.Errorf("restored volume = %v, want 35", got)
+	}
+
+	// A change made inside mpv (OSC / keymap) is remembered too. The first
+	// event after subscribing is mpv's own current-value echo, so send it.
+	h.fm.changeProp("volume", 35.0)
+	h.fm.changeProp("volume", 70.0)
+	waitFor(t, "mpv-side volume change reported", func() bool { return lastSeen() == 70 })
+
+	// With the setting off, nothing is restored.
+	o := h.pl.Options()
+	o.RememberVolume = false
+	h.pl.SetOptions(o)
+	setRemembered(20)
+	replay(t, h)
+	if got := h.fm.prop("volume"); got == float64(20) {
+		t.Error("volume restored although remember_volume is off")
+	}
+}
+
+// The toggle shows up in the player preferences and persists.
+func TestRememberVolumeToggleInMenu(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	var saved int
+	h.pl.SetSaveFunc(func(o Options) { saved++ })
+
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, playerPrefsTitle)
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Remember Volume")
+	h.pl.Key("ok")
+	if h.pl.Options().RememberVolume {
+		t.Error("Remember Volume toggle did not switch off")
+	}
+	if saved == 0 {
+		t.Error("toggle was not persisted")
+	}
+	if v := h.fm.lastText(); !strings.Contains(v, "Remember Volume") {
+		t.Errorf("prefs menu no longer lists the toggle:\n%s", v)
+	}
+}

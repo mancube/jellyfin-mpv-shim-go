@@ -33,6 +33,10 @@ type Settings struct {
 	LogLevel      string `json:"log_level"`
 	WriteLog      bool   `json:"write_log"`
 	MediaKeys     bool   `json:"media_keys"`
+	// RememberVolume restores the last volume used at the next playback start;
+	// LastVolume is the value we remember (written back automatically).
+	RememberVolume bool `json:"remember_volume"`
+	LastVolume     int  `json:"last_volume,omitempty"`
 
 	// --- keybindings (upstream kb_*) ------------------------------------
 	// Each entry maps an mpv key name to a shim action, e.g. {"m": "menu"}.
@@ -130,6 +134,7 @@ func DefaultSettings() Settings {
 		SubtitlePosition:     "bottom",
 		TranscodeDolbyVision: true,
 		MenuMouse:            true,
+		RememberVolume:       true,
 		SanitizeOutput:       true,
 		CheckUpdates:         true,
 		NotifyUpdates:        true,

@@ -318,6 +318,7 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	p.lastMute = false
 	p.watchedMarked = false
 	p.configureStreams()
+	p.restoreVolumeLocked()
 	p.applySubtitleStyleLocked()
 	if p.opt.Fullscreen {
 		p.mpv.SetProperty("fullscreen", true)

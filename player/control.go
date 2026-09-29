@@ -290,6 +290,7 @@ func (p *Player) SetVolume(pct int) {
 		}
 	}
 	p.mpv.SetProperty("volume", pct)
+	rememberVolume(pct)
 	p.touchLocked()
 	p.reportLocked()
 }

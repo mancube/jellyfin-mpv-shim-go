@@ -132,6 +132,7 @@ func (p *Player) onPropertyChange(prop string, data json.RawMessage) {
 		if int(v) == int(p.repVolume) {
 			return
 		}
+		rememberVolume(int(v))
 	case "seeking":
 		// Report when the seek finished (value false) — that is the new
 		// position the UI should show, not the drag in progress.
