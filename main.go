@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"mpv-shim/jfin"
+	"mpv-shim/player"
 )
 
 var version = "0.1.0-dev" // overridden via -ldflags "-X main.version=..."
@@ -148,6 +149,7 @@ func doLogin(ctx context.Context, s *Settings, username, password string, creds 
 		UserID:      client.UserID,
 		DeviceID:    s.ClientUUID,
 	})
+	creds.SetActive(s.Server, username)
 	if err := creds.Save(credPath); err != nil {
 		log.Printf("saving credentials: %v", err)
 		return 1
@@ -181,20 +183,74 @@ func doStatus(ctx context.Context, s *Settings, creds *jfin.CredFile) int {
 	return 0
 }
 
-// runSession is the main loop (M1): keep the /socket connection alive and
-// dispatch server events. Player wiring arrives in M2.
+// runSession is the main loop: keep the /socket connection alive, dispatch
+// Play events to the player, and run mpv as a managed subprocess.
 func runSession(s *Settings, a jfin.Account) int {
 	client := jfin.New(a.Server, s.PlayerName, a.DeviceID, version, s.IgnoreSSL)
 	client.Token, client.UserID = a.AccessToken, a.UserID
-	ws := jfin.NewWS(client, log.Default())
-	for _, t := range []string{"Play", "Playstate", "GeneralCommand", "UserDataChanged", "Sessions", "RestartRequired", "ServerShuttingDown"} {
-		t := t
-		ws.On(t, func(_ context.Context, data json.RawMessage) {
-			log.Printf("ws: %s: %s", t, string(data))
-		})
+
+	// The mpv IPC socket needs a world-safe dir; it's removed on exit.
+	ipcDir, err := os.MkdirTemp("", "mpv-shim-*")
+	if err != nil {
+		log.Fatalf("ipc dir: %v", err)
 	}
+	defer os.RemoveAll(ipcDir)
+
+	proc := player.NewProc(player.ProcOpts{
+		Path:       s.MpvPath,
+		IPCDir:     ipcDir,
+		ConfigDir:  s.MpvConfigDir,
+		AuthHeader: client.AuthHeader(),
+		MediaKeys:  s.MediaKeys,
+		Log:        log.Default(),
+	})
+	pl := player.New(proc, log.Default())
+
+	mcfg := jfin.MediaConfig{
+		LocalKbps: s.LocalKbps, RemoteKbps: s.RemoteKbps,
+		TranscodeH265: s.TranscodeH265, ForceH264: s.ForceH264,
+		SkipIntro: s.SkipIntro, SkipCredits: s.SkipCredits,
+	}
+
+	ws := jfin.NewWS(client, log.Default())
+	ws.On("Play", func(ctx context.Context, data json.RawMessage) {
+		go handlePlay(ctx, client, pl, mcfg, data) // don't block the WS read loop
+	})
+	// v12's remote-control API (POST /Sessions/{id}/Command) delivers play
+	// commands as GeneralCommand {Name, Arguments}; the web UI cast path uses
+	// the "Play" message above. Route the play-ish ones into handlePlay.
+	ws.On("GeneralCommand", func(ctx context.Context, data json.RawMessage) {
+		var d struct {
+			Name      string          `json:"Name"`
+			Arguments json.RawMessage `json:"Arguments"`
+		}
+		if json.Unmarshal(data, &d) != nil {
+			return
+		}
+		var pr jfin.PlayRequest
+		switch d.Name {
+		case "PlayNow", "PlayNext", "PlayLast", "PlayInstantMix":
+			var args struct {
+				Item    string   `json:"Item"`
+				ItemIDs []string `json:"ItemIds"`
+			}
+			if json.Unmarshal(d.Arguments, &args) == nil {
+				if args.Item != "" {
+					args.ItemIDs = append(args.ItemIDs, args.Item)
+				}
+				pr = jfin.PlayRequest{PlayCommand: d.Name, ItemIDs: args.ItemIDs}
+			}
+		default:
+			return // SetVolume, navigation, ... — M3
+		}
+		b, _ := json.Marshal(pr)
+		go handlePlay(ctx, client, pl, mcfg, b)
+	})
+
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	pl.Start(sigCtx)
+	defer pl.Shutdown()
 	log.Printf("mpv-shim %s — server %s, user %s, device %s", version, a.Server, a.Username, a.DeviceID)
 	log.Printf("session loop running, Ctrl-C to quit")
 	if err := ws.Run(sigCtx); err != nil {
@@ -202,6 +258,50 @@ func runSession(s *Settings, a jfin.Account) int {
 	}
 	log.Printf("bye")
 	return 0
+}
+
+// handlePlay is the WS "Play" event: build the queue (PlayNow) or extend it
+// (PlayNext/PlayLast) and drive the player. Port of upstream onPlay.
+func handlePlay(ctx context.Context, client *jfin.Client, pl *player.Player, cfg jfin.MediaConfig, data json.RawMessage) {
+	var d jfin.PlayRequest
+	if err := json.Unmarshal(data, &d); err != nil {
+		log.Printf("play: bad event: %v", err)
+		return
+	}
+	if len(d.ItemIDs) == 0 {
+		return
+	}
+	seq := 0
+	if d.StartIndex != nil {
+		seq = *d.StartIndex
+	}
+	offset := 0.0
+	if d.StartPositionTicks != nil {
+		offset = float64(*d.StartPositionTicks) / 1e7
+	}
+	cmd := d.PlayCommand
+	if !pl.HasVideo() && cmd != "PlayNow" {
+		log.Printf("play: %s with no active playlist, treating as PlayNow", cmd)
+		cmd = "PlayNow"
+	}
+	switch cmd {
+	case "PlayNow":
+		m, err := jfin.NewMedia(ctx, client, cfg, d.ItemIDs, seq, d.ControllingUserID,
+			d.AudioStreamIndex, d.SubtitleStreamIndex, d.MediaSourceID)
+		if err != nil {
+			log.Printf("play: %v", err)
+			return
+		}
+		if err := pl.Play(m, offset); err != nil {
+			log.Printf("play: %v", err)
+		}
+	case "PlayNext":
+		pl.InsertQueue(d.ItemIDs, false)
+	case "PlayLast":
+		pl.InsertQueue(d.ItemIDs, true)
+	default:
+		log.Printf("play: unknown command %q", cmd)
+	}
 }
 
 func doAccounts(args []string, creds *jfin.CredFile, credPath string) int {

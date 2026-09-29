@@ -50,10 +50,15 @@ func New(base, device, deviceID, version string, ignoreSSL bool) *Client {
 
 // AuthHeader builds the non-legacy MediaBrowser authorization header used on
 // every request (REST and WS). The legacy query token is dead by default in
-// v12, so this is the only auth mechanism.
+// v12, so this is the only auth mechanism. An empty Token is omitted — the
+// server rejects `Token=""` with a 401 (apiclient omits it too).
 func (c *Client) AuthHeader() string {
-	return fmt.Sprintf(`MediaBrowser Client="%s", Device="%s", DeviceId="%s", Version="%s", Token="%s"`,
-		ClientName, c.Device, c.DeviceID, c.Version, c.Token)
+	h := fmt.Sprintf(`MediaBrowser Client="%s", Device="%s", DeviceId="%s", Version="%s"`,
+		ClientName, c.Device, c.DeviceID, c.Version)
+	if c.Token != "" {
+		h += fmt.Sprintf(`, Token="%s"`, c.Token)
+	}
+	return h
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {

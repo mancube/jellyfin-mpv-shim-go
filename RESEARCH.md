@@ -59,8 +59,10 @@ source (highest `SupportsDirectPlay*50000 + Bitrate/1000` weight; honor requeste
 `MediaSourceId`) → URL is one of:
 
 1. local file path (direct, server is local and file exists),
-2. `{server}/Videos/{id}/stream?static=true&MediaSourceId=..&api_key=..` (direct stream;
-   `+LiveStreamId` for live TV),
+2. `{server}/Videos/{id}/stream?static=true&MediaSourceId=..` (direct stream;
+   `+LiveStreamId` for live TV). Auth is the `Authorization: MediaBrowser …` header
+   passed to mpv via `--http-header-fields` — v12's NAS rejects `api_key=` in the URL
+   (401).
 3. `{server}{TranscodingUrl}` (HLS transcode — profile says: video → `ts`/hls,
    audio → hls, plus subtitle profiles srt/ass/ssa/smi external+embedded, optional
    CodecProfiles for 10-bit/DV/HDR/HEVC constraints).
@@ -81,9 +83,17 @@ For the Go port the external model is the only sensible one and it's all stdlib:
 - JSON IPC: one JSON object per line; correlate responses by `request`/`request_id`/`error`;
   events: `file-loaded`, `end-file`, `shutdown`, `property-change`, `idle`, `log-message`.
 - Ops used (all trivial IPC): `loadfile`, `stop`, `seek`, `set_property`
-  (`pause`, `volume`, `mute`, `audio-stream`, `sub-stream`), `get_property`
+  (`pause`, `volume`, `mute`, `audio`, `sub`), `get_property`
   (`time-pos`, `duration`, `pause`, `seek-percentage`, ...), `script-message` (menu only),
   key bindings via `input_default_bindings`/`input_media_keys`.
+
+  **mpv ≥0.41 corrections (verified on 0.41.0):** spawn needs `--idle` (no file
+  arg); `--input-ipc-server` takes the bare socket path; `--http-header-fields`
+  takes the whole `Name: value` line (not `Name=value`); properties `version`,
+  `audio-stream`, `audio-id`, `sub-stream`, `sub-id`, `demuxer-state` are gone
+  (probe with `pause`; select tracks via `audio`/`sub`); load failure arrives as
+  `end-file` `reason:"error"` (no standalone `file-error` event), clean EOF is
+  `end-file` `reason:"eof"`. Full list in progress.md.
 
 ## 2. What v2.10 actually contains (7,471 LOC Python, no test suite)
 

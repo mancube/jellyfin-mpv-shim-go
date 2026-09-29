@@ -91,6 +91,16 @@ func (cf *CredFile) Get(server, username string) (Account, bool) {
 	return Account{}, false
 }
 
+// SetActive makes the account for (server, username) the active one.
+func (cf *CredFile) SetActive(server, username string) {
+	for i := range cf.Accounts {
+		if cf.Accounts[i].Server == server && cf.Accounts[i].Username == username {
+			cf.Active = i
+			return
+		}
+	}
+}
+
 // ActiveAccount is the currently selected account.
 func (cf *CredFile) ActiveAccount() (Account, bool) {
 	if len(cf.Accounts) == 0 {
