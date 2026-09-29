@@ -4,14 +4,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"mpv-shim/jfin"
@@ -45,6 +48,7 @@ func run() int {
 	password := fs.String("password", "", "password")
 	debug := fs.Bool("debug", false, "verbose logging")
 	loginOnly := fs.Bool("login-only", false, "log in and exit")
+	statusOnly := fs.Bool("status", false, "print connection status and exit")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -110,7 +114,15 @@ func run() int {
 		if *loginOnly {
 			return doLogin(ctx, &s, *username, *password, creds, credPath, *configPath)
 		}
-		return doStatus(ctx, &s, creds)
+		if *statusOnly {
+			return doStatus(ctx, &s, creds)
+		}
+		a, ok := creds.ActiveAccount()
+		if !ok {
+			fmt.Fprintln(os.Stderr, "no accounts configured. Run: mpv-shim login <server> <username> <password>")
+			return 1
+		}
+		return runSession(&s, a)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected login, accounts)\n", sub)
 		return 2
@@ -166,6 +178,29 @@ func doStatus(ctx context.Context, s *Settings, creds *jfin.CredFile) int {
 	fmt.Printf("user:    %s (%s)\n", u.Name, a.Username)
 	fmt.Printf("device:  %s [%s]\n", s.PlayerName, a.DeviceID)
 	fmt.Printf("version: %s\n", version)
+	return 0
+}
+
+// runSession is the main loop (M1): keep the /socket connection alive and
+// dispatch server events. Player wiring arrives in M2.
+func runSession(s *Settings, a jfin.Account) int {
+	client := jfin.New(a.Server, s.PlayerName, a.DeviceID, version, s.IgnoreSSL)
+	client.Token, client.UserID = a.AccessToken, a.UserID
+	ws := jfin.NewWS(client, log.Default())
+	for _, t := range []string{"Play", "Playstate", "GeneralCommand", "UserDataChanged", "Sessions", "RestartRequired", "ServerShuttingDown"} {
+		t := t
+		ws.On(t, func(_ context.Context, data json.RawMessage) {
+			log.Printf("ws: %s: %s", t, string(data))
+		})
+	}
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	log.Printf("mpv-shim %s — server %s, user %s, device %s", version, a.Server, a.Username, a.DeviceID)
+	log.Printf("session loop running, Ctrl-C to quit")
+	if err := ws.Run(sigCtx); err != nil {
+		log.Printf("session loop ended: %v", err)
+	}
+	log.Printf("bye")
 	return 0
 }
 
