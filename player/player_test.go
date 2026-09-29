@@ -1609,3 +1609,44 @@ func TestSaveCallbackGetsOptionsWithoutReentering(t *testing.T) {
 		t.Errorf("save callback got a half-filled Options: %+v", got)
 	}
 }
+
+// mpv's sub-pos counts *upwards from the bottom*: 100 is the default (bottom),
+// larger pushes further down. Getting this backwards renders "bottom" at the
+// top of the window (upstream SUBTITLE_POS has the same table).
+func TestSubPosMapping(t *testing.T) {
+	cases := map[string]string{
+		"bottom": "100", // the default
+		"":       "100", // unset = default
+		"middle": "80",
+		"top":    "0",
+		"junk":   "100",
+	}
+	for in, want := range cases {
+		if got := subPos(in); got != want {
+			t.Errorf("subPos(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The setting must reach mpv: bottom (default) is 100, top is 0.
+func TestApplySubtitleStylePosition(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	o := h.pl.Options()
+	o.SubPosition = "top"
+	h.pl.SetOptions(o)
+	if got := h.fm.prop("sub-pos"); got != "0" {
+		t.Errorf("sub-pos for top = %v, want 0", got)
+	}
+	o.SubPosition = "bottom"
+	h.pl.SetOptions(o)
+	if got := h.fm.prop("sub-pos"); got != "100" {
+		t.Errorf("sub-pos for bottom = %v, want 100", got)
+	}
+	o.SubPosition = "middle"
+	h.pl.SetOptions(o)
+	if got := h.fm.prop("sub-pos"); got != "80" {
+		t.Errorf("sub-pos for middle = %v, want 80", got)
+	}
+}

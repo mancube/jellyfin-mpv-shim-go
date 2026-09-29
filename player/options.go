@@ -231,17 +231,20 @@ func (p *Player) webSeekLengths() (back, fwd float64, ok bool) {
 	return defBack, defFwd, false
 }
 
-// subPos maps our setting to mpv's sub-pos.
+// subPos maps our setting to mpv's sub-pos. mpv counts *upwards from the
+// bottom*: 100 is the default (bottom) and larger values push the subtitle
+// further down, so "top" is the small number. Same table as upstream's
+// SUBTITLE_POS.
 func subPos(pos string) string {
 	switch pos {
 	case "top":
-		return "100"
-	case "middle":
-		return "50"
-	case "bottom", "":
 		return "0"
+	case "middle":
+		return "80"
+	case "bottom", "":
+		return "100"
 	}
-	return "0"
+	return "100"
 }
 
 // runShell runs a lifecycle hook detached; failures are logged, never fatal.
