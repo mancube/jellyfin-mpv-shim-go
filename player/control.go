@@ -472,20 +472,25 @@ func (p *Player) ToggleMute() {
 	}
 }
 
-// Screenshot writes a frame to ScreenshotDir (remote TakeScreenshot).
+// Screenshot writes a frame to ScreenshotDir (the `s` key, the OSD menu row
+// and the remote's TakeScreenshot). Shows where the file went, since the
+// default directory is in the config dir, not next to the video.
 func (p *Player) Screenshot() {
 	p.mu.Lock()
 	dir := p.ScreenshotDir
 	p.mu.Unlock()
 	if dir == "" {
-		p.log.Printf("screenshot: no directory configured")
+		p.log.Printf("screenshot: no screenshot_dir configured")
 		return
 	}
-	if err := p.mpv.Screenshot(dir); err != nil {
+	path, err := p.mpv.Screenshot(dir)
+	if err != nil {
 		p.log.Printf("screenshot: %v", err)
+		p.mpv.ShowText("Screenshot failed", 3000, 1)
 		return
 	}
-	p.mpv.ShowText("Screenshot saved", 2000, 1)
+	p.log.Printf("screenshot saved: %s", path)
+	p.mpv.ShowText("Saved "+path, 3000, 1)
 }
 
 // WatchedSkip marks the current item watched and plays the next one

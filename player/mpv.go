@@ -33,7 +33,7 @@ type Mpv interface {
 	Keybind(key, cmd string)   // bind a key to an mpv command ("" unbinds)
 	Observe(name string) error // push property changes as property-change events
 	Command(args ...any) error
-	Screenshot(dir string) error
+	Screenshot(dir string) (string, error)
 	Alive() bool
 	Incarnation() int // spawn counter: changes when mpv (re)started
 	Graceful() bool
@@ -541,19 +541,29 @@ func (p *Proc) Observe(name string) error {
 	return err
 }
 
-// Screenshot writes a video frame into dir (upstream's TakeScreenshot).
-// mpv 0.41 dropped `screenshot-to-file` and the old flag/argument form: the
-// destination comes from the screenshot-template option now.
-func (p *Proc) Screenshot(dir string) error {
+// Screenshot writes one video frame into dir and returns the file it wrote.
+//
+// `screenshot-to-file` is still a *command* in mpv 0.41 (the property of that
+// name is gone, which is what made the old implementation look broken), while
+// the `screenshot` command goes through the screenshot-template option and
+// fails outright on some builds/VO combinations. So: try the direct command,
+// and fall back to the template route for older mpv.
+func (p *Proc) Screenshot(dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return "", err
+	}
+	name := filepath.Join(dir, fmt.Sprintf("shot-%s.png", time.Now().Format("20060102-150405.000")))
+	if _, err := p.command("screenshot-to-file", name); err == nil {
+		return name, nil
 	}
 	tmpl := filepath.Join(dir, "shot-%03d.jpg")
 	if _, err := p.command("set_property", "screenshot-template", tmpl); err != nil {
-		return fmt.Errorf("screenshot-template: %w", err)
+		return "", fmt.Errorf("screenshot: %w", err)
 	}
-	_, err := p.command("screenshot", "video")
-	return err
+	if _, err := p.command("screenshot", "video"); err != nil {
+		return "", fmt.Errorf("screenshot: %w", err)
+	}
+	return tmpl, nil
 }
 
 // Kill terminates the process: SIGTERM, escalating to SIGKILL after 3s.

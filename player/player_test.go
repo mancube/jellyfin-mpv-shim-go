@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -114,11 +115,12 @@ func (f *fakeMpv) Command(args ...any) error {
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeMpv) Screenshot(dir string) error {
+func (f *fakeMpv) Screenshot(dir string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.shots = append(f.shots, dir)
-	return nil
+	f.cmds = append(f.cmds, "screenshot-to-file "+dir+"/shot.png")
+	return filepath.Join(dir, "shot.png"), nil
 }
 
 // Observe records the subscription; changeProp simulates mpv's event.
@@ -1846,5 +1848,32 @@ func TestRememberVolumeToggleInMenu(t *testing.T) {
 	}
 	if v := h.fm.lastText(); !strings.Contains(v, "Remember Volume") {
 		t.Errorf("prefs menu no longer lists the toggle:\n%s", v)
+	}
+}
+
+// Screenshots must use mpv's `screenshot-to-file` command (the `screenshot`
+// command fails on some 0.41 builds) and tell the user where the file went.
+func TestScreenshotUsesScreenshotToFile(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.ScreenshotDir = "/tmp/shots"
+
+	before := h.fm.numCmds()
+	// The action the `s` key and the OSD menu row both call (the fake mpv does
+	// not run key bindings, so call the action directly).
+	h.pl.Key("screenshot")
+	h.fm.mu.Lock()
+	cmds := strings.Join(h.fm.cmds[before:], "|")
+	shots := append([]string(nil), h.fm.shots...)
+	h.fm.mu.Unlock()
+
+	if len(shots) != 1 || shots[0] != "/tmp/shots" {
+		t.Errorf("screenshot dirs = %v, want [/tmp/shots]", shots)
+	}
+	if !strings.Contains(cmds, "screenshot-to-file") {
+		t.Errorf("screenshot command = %q, want screenshot-to-file", cmds)
+	}
+	if !strings.Contains(h.fm.lastText(), "/tmp/shots") {
+		t.Errorf("no confirmation with the file location: %q", h.fm.lastText())
 	}
 }

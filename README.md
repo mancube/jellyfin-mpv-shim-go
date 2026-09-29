@@ -171,7 +171,7 @@ terminal.
 | `f` | fullscreen | `ESC` | leave fullscreen / close the menu |
 | `q` | stop | `<` `>` | previous / next item |
 | `w` | mark watched + next | `u` | stop + mark unwatched |
-| `s` | screenshot | | |
+| `s` | screenshot (saved to `screenshot_dir`, path shown in the OSD) | | |
 
 The OSD menu also has **Video Preferences** and **Player Preferences**
 sub-menus (transcode quality, subtitle size/colour/position, HDR/Hi10p/DVR
