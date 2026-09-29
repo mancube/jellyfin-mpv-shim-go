@@ -182,6 +182,11 @@ func (w *WS) readLoop(ctx context.Context, conn *websocket.Conn) {
 					}
 				}
 			}(ka, kaDone)
+		case "KeepAlive":
+			// Server heartbeat broadcast; the client→server KeepAlive we send
+			// (driven by ForceKeepAlive) is what the server monitors. Same as
+			// apiclient: log and ignore.
+			w.log.Printf("ws: KeepAlive")
 		default:
 			if h := w.handlers[msg.MessageType]; h != nil {
 				h(ctx, msg.Data)
