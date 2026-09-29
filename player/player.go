@@ -40,11 +40,13 @@ type Player struct {
 	events             chan mpvEvent
 	menu               *menu
 	// last reported pause/mute/volume, to spot remote/UI-visible changes
-	repPause   bool
-	repMute    bool
-	repVolume  float64
-	lastTick   time.Time
-	lastReport time.Time // last progress report we sent (report throttling)
+	repPause    bool
+	repMute     bool
+	repVolume   float64
+	lastTick    time.Time
+	crashLoop   int             // consecutive crash restarts without playback progress
+	initialEcho map[string]bool // first property-change per prop is mpv's echo
+	lastReport  time.Time       // last progress report we sent (report throttling)
 	// idle-stop: when > 0, playback is stopped after this long without
 	// activity (upstream stop_idle + idle_cmd_delay).
 	idleStop     time.Duration
@@ -58,17 +60,20 @@ type Player struct {
 
 // mpvEvent is one queued IPC event (the hook runs in the reader goroutine).
 type mpvEvent struct {
-	name string
-	args []string
-	prop string          // property-change: property name
-	data json.RawMessage // property-change: new value
+	name   string
+	args   []string
+	prop   string          // property-change: property name
+	data   json.RawMessage // property-change: new value
+	reason string          // end-file: "eof" | "stop" | "quit" | "error" | ...
+
 }
 
 func New(mpv Mpv, lg *log.Logger) *Player {
 	if lg == nil {
 		lg = log.Default()
 	}
-	p := &Player{mpv: mpv, log: lg, PauseReport: true} // pause_report defaults on
+	// pause_report defaults on; initialEcho collects mpv's subscribe echoes.
+	p := &Player{mpv: mpv, log: lg, PauseReport: true, initialEcho: map[string]bool{}}
 	p.menu = newMenu(p)
 	return p
 }
@@ -174,10 +179,16 @@ func (p *Player) afterSpawn(ctx context.Context) {
 		if p.mpv.Alive() {
 			if id := p.mpv.Incarnation(); id != bound {
 				p.BindKeys()
+				p.mu.Lock()
+				p.initialEcho = map[string]bool{}
+				p.mu.Unlock()
 				for _, prop := range observedProps {
 					if err := p.mpv.Observe(prop); err != nil {
 						p.log.Printf("observe %s: %v", prop, err)
 					}
+					p.mu.Lock()
+					p.initialEcho[prop] = true
+					p.mu.Unlock()
 				}
 				bound = id
 			}
@@ -196,8 +207,13 @@ func (p *Player) afterSpawn(ctx context.Context) {
 	}
 }
 
+// maxCrashRestarts bounds the crash-restart loop: three respawns without the
+// position moving means something is fundamentally wrong (bad file, broken
+// video output), and retrying forever just burns CPU and spawns processes.
+const maxCrashRestarts = 3
+
 // observedProps are the mpv properties we watch for immediate UI feedback.
-var observedProps = []string{"pause", "mute", "volume", "seeking", "time-pos"}
+var observedProps = []string{"pause", "mute", "volume", "seeking", "time-pos", "aid", "sid"}
 
 // Play loads the media's video into mpv and reports session start.
 // Port of upstream play + _play_media.
@@ -395,13 +411,28 @@ func (p *Player) handleEvent(name string, data json.RawMessage) {
 	case "file-error":
 		failed = true
 	case "end-file":
+		// mpv 0.41: reason is "eof" (played to the end), "stop" (something
+		// called stop), "quit" (window closed / mpv shutting down), "error".
+		// Only "eof" means the episode finished; treating "stop"/"quit" as
+		// finished is what made closing the window auto-advance the queue in a
+		// loop, spawning a new mpv for every following episode.
 		var e struct {
 			Reason    string `json:"reason"`
 			FileError string `json:"file_error"`
 		}
-		if json.Unmarshal(data, &e) == nil && (e.Reason == "error" || e.FileError != "") {
+		_ = json.Unmarshal(data, &e)
+		reason := e.Reason
+		if e.Reason == "error" || e.FileError != "" {
 			failed = true
 		}
+		if reason == "" {
+			reason = "stop" // be conservative: no auto-advance without proof
+		}
+		select {
+		case p.events <- mpvEvent{name: "end-file", reason: reason}:
+		default:
+		}
+		return
 	default:
 		return
 	}
@@ -429,6 +460,12 @@ func (p *Player) eventLoop() {
 			p.onPropertyChange(ev.prop, ev.data)
 			continue
 		}
+		if ev.name == "end-file" {
+			p.mu.Lock()
+			p.onEndFileLocked(ev.reason)
+			p.mu.Unlock()
+			continue
+		}
 		if ev.name == "file-error" {
 			p.mu.Lock()
 			p.fileErr = false
@@ -437,14 +474,26 @@ func (p *Player) eventLoop() {
 			p.mu.Unlock()
 			continue
 		}
-		p.menu.Hide() // the queue advanced; the old menu is stale
-		p.mu.Lock()
-		p.handleEndFileLocked()
-		p.mu.Unlock()
 	}
 }
 
-// handleEndFileLocked is the end-file path: mark watched, advance the queue
+// onEndFileLocked routes an end-file by reason. Only "eof" (the file really
+// played out) marks watched and advances the queue; "stop"/"quit" means the
+// user or mpv ended playback, so we just close out the session.
+func (p *Player) onEndFileLocked(reason string) {
+	switch reason {
+	case "eof":
+		p.handleEndFileLocked()
+	case "error":
+		p.log.Printf("mpv: playback error")
+		p.stopLocked()
+	default: // "stop" (remote stop, `q`) or "quit" (window closed)
+		p.log.Printf("mpv: playback ended (%s) — not advancing the queue", reason)
+		p.stopLocked()
+	}
+}
+
+// handleEndFileLocked is the natural-end path: mark watched, advance the queue
 // (auto-play), or close out the session. Port of upstream finished_callback.
 func (p *Player) handleEndFileLocked() {
 	m := p.media
@@ -514,8 +563,17 @@ func (p *Player) handleExit() {
 		return
 	}
 	// Crash: kill -9 / OOM / segfault. Respawn and resume at the last
-	// known position and pause state.
-	p.log.Printf("mpv exited unexpectedly — restarting playback")
+	// known position and pause state. Repeated crashes (a file mpv cannot
+	// play, a broken VO, a respawn loop) must not turn into an endless
+	// process churn, so give up after a few tries without progress.
+	if p.crashLoop >= maxCrashRestarts {
+		p.log.Printf("mpv crashed %d times in a row without playing — giving up", p.crashLoop)
+		p.crashLoop = 0
+		p.stopLocked()
+		return
+	}
+	p.crashLoop++
+	p.log.Printf("mpv exited unexpectedly — restarting playback (%d/%d)", p.crashLoop, maxCrashRestarts)
 	url, m := p.url, p.media
 	if url == "" {
 		p.media = nil
@@ -598,6 +656,9 @@ func (p *Player) Tick() {
 	p.lastPause = pause
 	if x, err := p.mpv.GetProperty("time-pos"); err == nil {
 		if f, ok := x.(float64); ok {
+			if f > 0.5 {
+				p.crashLoop = 0 // it is playing again
+			}
 			// A jump far bigger than a tick's worth of playback is a local
 			// seek: report it right away so the UI seek bar follows (the
 			// normal work below still runs).

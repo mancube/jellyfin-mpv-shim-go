@@ -16,10 +16,81 @@ import (
 // volume, seek finished) always report immediately.
 const positionReportInterval = 1500 * time.Millisecond
 
+// trackChangeLocked updates the video's aid/sid from an mpv-side track switch
+// and reports it. False = nothing to report (unchanged, or a track we cannot
+// map, e.g. an external subtitle added by the user).
+func (p *Player) trackChangeLocked(prop string, data json.RawMessage) bool {
+	v := p.media.Video
+	// mpv track ids are the mapped sequence values; "no"/-1 means off.
+	var id any
+	if err := json.Unmarshal(data, &id); err != nil {
+		return false
+	}
+	if s, ok := id.(string); ok {
+		if s == "no" || s == "auto" {
+			id = float64(-1)
+		} else {
+			return false // "auto": let mpv pick, nothing to sync
+		}
+	}
+	f, ok := id.(float64)
+	if !ok {
+		return false
+	}
+	seq := map[int]int{} // mpv id → Jellyfin index
+	if prop == "aid" {
+		for jellyfinIdx, mpvID := range v.AudioSeq {
+			seq[mpvID] = jellyfinIdx
+		}
+	} else {
+		for jellyfinIdx, mpvID := range v.SubtitleSeq {
+			seq[mpvID] = jellyfinIdx
+		}
+		if f == -1 { // subtitles off
+			v.Sid = &offIndex
+			return true
+		}
+		if u, ok := v.SubtitleURL[seq[int(f)]]; ok {
+			// An external subtitle: mpv has it loaded, the web UI wants the
+			// Jellyfin index. We cannot know which one it is, so log and skip.
+			p.log.Printf("external subtitle switched in mpv (%s); sync it from the web UI", u)
+			return false
+		}
+	}
+	idx, ok := seq[int(f)]
+	if !ok {
+		return false
+	}
+	if prop == "aid" {
+		if v.Aid != nil && *v.Aid == idx {
+			return false
+		}
+		v.Aid = &idx
+	} else {
+		if v.Sid != nil && *v.Sid == idx {
+			return false
+		}
+		v.Sid = &idx
+	}
+	p.log.Printf("track switched in mpv: %s=%d", prop, idx)
+	return true
+}
+
+// offIndex is the Jellyfin "no subtitles" index.
+var offIndex = -1
+
 // onPropertyChange handles one property-change event.
 func (p *Player) onPropertyChange(prop string, data json.RawMessage) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// mpv sends the property's current value as soon as we subscribe. That
+	// echo is not a user action, so drop the first one per property (per mpv
+	// incarnation) — otherwise an auto-selected track would be adopted as the
+	// user's choice and pushed to the web UI.
+	if p.initialEcho[prop] {
+		delete(p.initialEcho, prop)
+		return
+	}
 	if p.media == nil || !p.shouldSendTimeline || p.aborted() {
 		return
 	}
@@ -63,6 +134,13 @@ func (p *Player) onPropertyChange(prop string, data json.RawMessage) {
 			return
 		}
 		if v {
+			return
+		}
+	case "aid", "sid":
+		// A track switch done inside mpv (OSC, the `a`/`s` keys, a client
+		// like MPRIS) must reach the web UI too: map the mpv track id back to
+		// the Jellyfin stream index and report it.
+		if !p.trackChangeLocked(prop, data) {
 			return
 		}
 	case "time-pos":

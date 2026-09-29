@@ -142,6 +142,18 @@ func (f *fakeMpv) changeProp(name string, value any) {
 	h("property-change", b)
 }
 
+// endFile fires the real end-file event with mpv 0.41's reason field.
+func (f *fakeMpv) endFile(reason string) {
+	f.mu.Lock()
+	h := f.hookFn
+	f.mu.Unlock()
+	if h == nil {
+		return
+	}
+	b, _ := json.Marshal(map[string]any{"reason": reason})
+	h("end-file", b)
+}
+
 func (f *fakeMpv) Incarnation() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -432,7 +444,7 @@ func TestEndFileAdvancesQueue(t *testing.T) {
 		return len(p) == 1
 	})
 	h.fm.SetProperty("time-pos", 20.0)
-	h.fm.fire("end-file")
+	h.fm.endFile("eof")
 	waitFor(t, "start b", func() bool {
 		p, _, _, _ := h.recs.snapshot()
 		return len(p) == 2
@@ -951,5 +963,100 @@ func TestObserversSubscribedAfterSpawn(t *testing.T) {
 			t.Fatalf("observed %v, want %v", got, observedProps)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Regression: closing the mpv window (or pressing stop) must NOT auto-advance
+// the queue — that used to spawn a new mpv for every following episode.
+func TestEndFileStopDoesNotAdvanceQueue(t *testing.T) {
+	for _, reason := range []string{"stop", "quit", ""} {
+		t.Run("reason="+reason, func(t *testing.T) {
+			h := setup(t)
+			playOne(t, h, cfg())
+			h.pl.InsertQueue([]string{"b", "c"}, false) // queue: a, b, c
+			loads := h.fm.numLoads()
+
+			h.fm.endFile(reason)
+			time.Sleep(200 * time.Millisecond)
+
+			if h.fm.numLoads() != loads {
+				t.Errorf("reason %q loaded another item (%d → %d loads)", reason, loads, h.fm.numLoads())
+			}
+			if h.pl.HasVideo() {
+				t.Error("reason " + reason + ": still has an active video")
+			}
+			_, _, stopped, _ := h.recs.snapshot()
+			if len(stopped) == 0 {
+				t.Error("no stop report after " + reason)
+			}
+		})
+	}
+}
+
+// A crash loop (mpv dies again and again without playing) must give up.
+func TestCrashLoopGivesUp(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	// Each crash resumes at lastPos, which never advances, so the guard trips.
+	for i := 0; i < maxCrashRestarts+1; i++ {
+		h.fm.crash()
+		waitFor(t, "restart handled", func() bool { return !h.pl.HasVideo() || h.fm.numLoads() > i+1 })
+		if !h.pl.HasVideo() {
+			break
+		}
+	}
+	if h.pl.HasVideo() {
+		t.Errorf("crash loop did not give up after %d restarts", maxCrashRestarts)
+	}
+}
+
+// A track switch made inside mpv (OSC/keys) reaches the web UI.
+func TestLocalTrackSwitchIsReported(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	progress := func() []jfin.SessionInfo {
+		_, pr, _, _ := h.recs.snapshot()
+		return pr
+	}
+	n := len(progress())
+
+	// The fixture has audio at Jellyfin index 1 and 3 → mpv ids 1 and 2.
+	h.fm.changeProp("aid", 2)
+	waitFor(t, "audio switch report", func() bool { return len(progress()) > n })
+	if got := progress()[len(progress())-1].AudioStreamIndex; got != 3 {
+		t.Errorf("reported audio index = %d, want 3", got)
+	}
+
+	// Subtitles off in mpv ("no") maps to Jellyfin -1.
+	n = len(progress())
+	h.fm.changeProp("sid", "no")
+	waitFor(t, "subtitle off report", func() bool { return len(progress()) > n })
+	if got := progress()[len(progress())-1].SubtitleStreamIndex; got != -1 {
+		t.Errorf("reported subtitle index = %d, want -1", got)
+	}
+}
+
+// mpv echoes each property's current value when we subscribe; that must not be
+// mistaken for a user action (an auto-selected track would otherwise be pushed
+// to the web UI as the user's choice).
+func TestSubscribeEchoIsIgnored(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	// The subscribe echo for sid arrives with mpv's current track.
+	h.pl.mu.Lock()
+	h.pl.initialEcho["sid"] = true
+	h.pl.mu.Unlock()
+	h.fm.changeProp("sid", 1) // echo: ignored
+	_, pr0, _, _ := h.recs.snapshot()
+	n := len(pr0)
+	h.fm.changeProp("sid", 1) // a real user switch now (mpv id 1 = Jellyfin 2)
+	waitFor(t, "real switch reported", func() bool {
+		_, pr, _, _ := h.recs.snapshot()
+		return len(pr) > n
+	})
+	_, pr1, _, _ := h.recs.snapshot()
+	if got := pr1[len(pr1)-1].SubtitleStreamIndex; got != 2 {
+		t.Errorf("reported subtitle index = %d, want 2", got)
 	}
 }

@@ -87,6 +87,7 @@ type Proc struct {
 	death       chan struct{} // stable; monitor sends a token per death
 	incarnation int
 	graceful    bool
+	exitClean   bool // mpv exited on request (not a crash)
 	hook        func(name string, data json.RawMessage)
 	dead        bool // Kill() called: never spawn again
 }
@@ -122,10 +123,14 @@ func (p *Proc) Incarnation() int {
 	return p.incarnation
 }
 
+// Graceful reports whether mpv exited because someone asked it to (the
+// `shutdown` event, a clean quit, or SIGTERM/SIGINT — which is what closing
+// the player window does) rather than crashing (SIGKILL/SIGSEGV/OOM, or a
+// non-zero exit). The player only respawns after a real crash.
 func (p *Proc) Graceful() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.graceful
+	return p.graceful || p.exitClean
 }
 
 func (p *Proc) SetEventHook(h func(name string, data json.RawMessage)) {
@@ -203,6 +208,7 @@ func (p *Proc) spawn(ctx context.Context) error {
 	p.pending = map[int64]chan *rpcMsg{}
 	p.nextID = 0
 	p.graceful = false
+	p.exitClean = false
 	p.mu.Unlock()
 	go p.monitor(cmd, id)
 
@@ -241,13 +247,14 @@ func (p *Proc) spawn(ctx context.Context) error {
 // monitor reaps the process and signals death if it's the current
 // incarnation.
 func (p *Proc) monitor(cmd *exec.Cmd, id int) {
-	_ = cmd.Wait()
+	werr := cmd.Wait()
 	p.mu.Lock()
 	if id != p.incarnation {
 		p.mu.Unlock()
 		return
 	}
 	p.conn = nil
+	p.exitClean = exitedCleanly(werr)
 	for pid, ch := range p.pending {
 		b, _ := json.Marshal("mpv: process exited")
 		ch <- &rpcMsg{RequestID: &pid, Error: b}
@@ -258,6 +265,28 @@ func (p *Proc) monitor(cmd *exec.Cmd, id int) {
 	case p.death <- struct{}{}:
 	default: // coalesced; a token is already pending
 	}
+}
+
+// exitedCleanly classifies a process exit: a clean quit, or SIGTERM/SIGINT
+// (closing the player window) is "asked to stop"; a fatal signal (SIGKILL,
+// SIGSEGV, SIGABRT…) or a non-zero exit status is a crash.
+func exitedCleanly(err error) bool {
+	if err == nil {
+		return true
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		status, ok := ee.Sys().(syscall.WaitStatus)
+		if ok && status.Signaled() {
+			switch status.Signal() {
+			case syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP:
+				return true
+			}
+			return false
+		}
+		return false
+	}
+	return false
 }
 
 // probe writes a get_property and checks the reply. `pause` is used because
