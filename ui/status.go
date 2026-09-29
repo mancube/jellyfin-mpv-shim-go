@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -238,7 +239,11 @@ func fmtTime(sec float64) string {
 
 // RunSetup runs the account wizard and returns when the user quits it.
 func RunSetup(d Deps) error {
-	_, err := tea.NewProgram(newSetupModel(d), tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(newSetupModel(d),
+		tea.WithAltScreen(),
+		tea.WithInput(os.Stdin), // never fall back to opening /dev/tty
+		tea.WithOutput(os.Stdout),
+	).Run()
 	return err
 }
 
@@ -246,7 +251,11 @@ func RunSetup(d Deps) error {
 // program exists, so callers can wire up the tray there: a tray Quit can then
 // always reach QuitUI, even if it is clicked immediately.
 func RunStatus(s *Session, d Deps, onStart func()) error {
-	prog := tea.NewProgram(newStatusModel(s, d), tea.WithAltScreen())
+	prog := tea.NewProgram(newStatusModel(s, d),
+		tea.WithAltScreen(),
+		tea.WithInput(os.Stdin),   // never fall back to opening /dev/tty: with a
+		tea.WithOutput(os.Stdout), // redirected stdin that silently eats keys
+	)
 	s.QuitUI = prog.Quit
 	if onStart != nil {
 		onStart()

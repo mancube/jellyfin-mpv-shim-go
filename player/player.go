@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os/exec"
-	"runtime"
 	"sync"
 	"time"
 
@@ -210,21 +208,6 @@ func (p *Player) applySubtitleStyleLocked() {
 	}
 }
 
-// raiseWindowLocked brings the mpv window forward when a new item starts, so
-// casting from the couch does not need a click (upstream raise_mpv).
-func (p *Player) raiseWindowLocked() {
-	switch runtime.GOOS {
-	case "darwin", "windows":
-		// The window manager raises the player on focus; nothing portable to do.
-		return
-	default:
-		// `xdotool`/KDE's kdotool are optional; ignore when absent.
-		if _, err := exec.LookPath("xdotool"); err == nil {
-			_ = exec.Command("xdotool", "search", "--name", "mpv", "windowactivate").Run()
-		}
-	}
-}
-
 func (p *Player) HasVideo() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -338,9 +321,6 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	p.applySubtitleStyleLocked()
 	if p.opt.Fullscreen {
 		p.mpv.SetProperty("fullscreen", true)
-	}
-	if p.opt.RaiseMPV {
-		p.raiseWindowLocked()
 	}
 	p.runShell("play_cmd", p.opt.ShellCmds.Play)
 	p.loadChaptersLocked()

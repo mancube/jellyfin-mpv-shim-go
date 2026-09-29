@@ -140,7 +140,7 @@ func run() int {
 		if !ok {
 			// First run: offer the wizard when there is a terminal, else point
 			// at the CLI login.
-			if !*headless && isTTY() {
+			if !*headless && isTTY() { // otherwise: point at the CLI login
 				if rc := doSetup(&s, creds, credPath); rc != 0 {
 					return rc
 				}
@@ -153,7 +153,13 @@ func run() int {
 				return 1
 			}
 		}
-		return runSession(&s, a, creds, credPath, cfgDir, *configPath, !*headless && isTTY())
+		interactive := !*headless && isTTY()
+		if !*headless && !interactive {
+			// No usable terminal (redirected stdin/stdout, a service, a
+			// pipeline): the TUI would render but never see a key press.
+			log.Printf("no interactive terminal on stdin/stdout — running headless; use a terminal for the TUI, or mpv-shim setup in one")
+		}
+		return runSession(&s, a, creds, credPath, cfgDir, *configPath, interactive)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected login, accounts, setup)\n", sub)
 		return 2
@@ -295,7 +301,7 @@ func playerOptionsLocked(s *Settings) player.Options {
 	o.UseWebSeek = s.UseWebSeek
 	o.MediaKeySeek = s.MediaKeySeek
 	o.SubSize, o.SubColor, o.SubPosition = s.SubtitleSize, s.SubtitleColor, s.SubPosition()
-	o.AutoPlay, o.Fullscreen, o.RaiseMPV, o.EnableOSC = s.AutoPlay, s.Fullscreen, s.RaiseMPV, s.EnableOSC
+	o.AutoPlay, o.Fullscreen, o.EnableOSC = s.AutoPlay, s.Fullscreen, s.EnableOSC
 	o.ForceSetPlayed = s.ForceSetPlayed
 	o.PlaybackTimeout = time.Duration(s.PlaybackTimeoutS) * time.Second
 	o.IdleCmdDelay = time.Duration(s.IdleCmdDelayS) * time.Second
@@ -322,7 +328,7 @@ func applyOptionsToSettings(s *Settings, o player.Options) {
 	s.SeekHExact, s.SeekVExact, s.UseWebSeek = o.SeekHExact, o.SeekVExact, o.UseWebSeek
 	s.MediaKeySeek = o.MediaKeySeek
 	s.SubtitleSize, s.SubtitleColor, s.SubtitlePosition = o.SubSize, o.SubColor, o.SubPosition
-	s.AutoPlay, s.Fullscreen, s.RaiseMPV, s.EnableOSC = o.AutoPlay, o.Fullscreen, o.RaiseMPV, o.EnableOSC
+	s.AutoPlay, s.Fullscreen, s.EnableOSC = o.AutoPlay, o.Fullscreen, o.EnableOSC
 	s.ForceSetPlayed = o.ForceSetPlayed
 	s.SkipIntro, s.SkipIntroAlways = o.SkipIntro, o.SkipIntroAlways
 	s.SkipCredits, s.SkipCreditsAlways = o.SkipCredits, o.SkipCreditsAlways
@@ -833,9 +839,16 @@ func openLogFile(cfgDir string) (*os.File, error) {
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 }
 
-// isTTY reports whether stdout is a terminal (so the TUI can take it over).
+// isTTY reports whether we can run the TUI: it needs *both* ends of the
+// terminal. Checking only stdout is how you end up with a TUI that renders but
+// never receives a keystroke (stdin redirected by a launcher, a service
+// manager, `nohup`, or a shell pipeline).
 func isTTY() bool {
-	fi, err := os.Stdout.Stat()
+	return isTerminal(os.Stdin) && isTerminal(os.Stdout)
+}
+
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 

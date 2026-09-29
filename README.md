@@ -166,7 +166,6 @@ dot: green connected, amber reconnecting, grey offline.
 | `media_key_seek` | false | media keys seek instead of skipping episodes |
 | `auto_play` | true | advance to the next queue item when one finishes |
 | `fullscreen` | true | start playback fullscreen |
-| `raise_mpv` | true | raise the mpv window when a new item starts |
 | `enable_osc` | true | keep mpv's on-screen controller (the menu hides it while open) |
 | `force_set_played` | false | mark watched even when auto_play is off |
 | `playback_timeout` | 30 | seconds to wait for the media to start |

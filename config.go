@@ -51,7 +51,6 @@ type Settings struct {
 	// --- playback -------------------------------------------------------
 	AutoPlay         bool `json:"auto_play"`
 	Fullscreen       bool `json:"fullscreen"`
-	RaiseMPV         bool `json:"raise_mpv"`
 	EnableOSC        bool `json:"enable_osc"`
 	PlaybackTimeoutS int  `json:"playback_timeout"` // seconds waiting for duration
 	ForceSetPlayed   bool `json:"force_set_played"`
@@ -124,7 +123,6 @@ func DefaultSettings() Settings {
 		SeekRight:            5,
 		AutoPlay:             true,
 		Fullscreen:           true,
-		RaiseMPV:             true,
 		EnableOSC:            true,
 		PlaybackTimeoutS:     30,
 		SubtitleSize:         100,

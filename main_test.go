@@ -326,7 +326,7 @@ func TestSettingsOptionsRoundTrip(t *testing.T) {
 	s.SeekUp, s.SeekDown, s.SeekLeft, s.SeekRight = 120, -120, -15, 30
 	s.SeekHExact, s.MediaKeySeek, s.UseWebSeek = true, true, true
 	s.SubtitleSize, s.SubtitleColor, s.SubtitlePosition = 125, "#FFEE00EE", "top"
-	s.AutoPlay, s.Fullscreen, s.EnableOSC, s.RaiseMPV = false, false, false, false
+	s.AutoPlay, s.Fullscreen, s.EnableOSC = false, false, false
 	s.SkipIntroAlways, s.SkipCredits = true, false
 	s.MenuMouse, s.WriteLog, s.CheckUpdates = false, true, false
 	s.TranscodeHi10p, s.TranscodeHDR, s.TranscodeDolbyVision = true, true, false
@@ -383,10 +383,29 @@ func TestSettingsConcurrentAccess(t *testing.T) {
 	<-stop
 }
 
+// syncWriter is a mutex-guarded log sink: the session logs from its own
+// goroutine while the test inspects it.
+type syncWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
 // Disconnect stops the socket loop but keeps the player usable, and a
 // reconnect starts the loop again (the tray item toggles between the two).
 func TestSessionDisconnectReconnect(t *testing.T) {
-	var logBuf bytes.Buffer
+	var logBuf syncWriter
 	lg := log.New(&logBuf, "", 0)
 	s := DefaultSettings()
 	sess, err := newSession(&s, jfin.Account{Server: "http://127.0.0.1:1", DeviceID: "d1"}, lg, ui.NewLogRing(10), t.TempDir(), filepath.Join(t.TempDir(), "config.json"))

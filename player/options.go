@@ -35,7 +35,6 @@ type Options struct {
 	// and call Save, so they must stay in sync with config.json.
 	AutoPlay             bool
 	Fullscreen           bool
-	RaiseMPV             bool
 	EnableOSC            bool
 	ForceSetPlayed       bool
 	SkipIntro            bool
@@ -80,7 +79,6 @@ func DefaultOptions() Options {
 		SubPosition:     "bottom",
 		AutoPlay:        true,
 		Fullscreen:      true,
-		RaiseMPV:        true,
 		EnableOSC:       true,
 		PlaybackTimeout: 30 * time.Second,
 		IdleCmdDelay:    60 * time.Second,
