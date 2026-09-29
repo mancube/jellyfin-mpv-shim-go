@@ -25,7 +25,7 @@ func TestDeviceProfileGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `{
-  "Name": "Jellyfin MPV Shim",
+  "Name": "Jellyfin MPV Shim - Go",
   "MaxStreamingBitrate": 10000000,
   "MaxStaticBitrate": 10000000,
   "MusicStreamingTranscodingBitrate": 1280000,

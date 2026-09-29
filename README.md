@@ -45,7 +45,7 @@ Config lives in `<config dir>/config.json`, credentials in `cred.json`
 |---|---|---|
 | `server` | — | Jellyfin URL, e.g. `http://localhost:8096` |
 | `username` | — | last logged-in user |
-| `player_name` | `mpv` | device name shown in the Jellyfin web UI |
+| `player_name` | hostname | device name shown in the Jellyfin web UI |
 | `client_uuid` | generated | stable device id |
 | `mpv_path` | `mpv` | mpv binary |
 | `mpv_config_dir` | mpv's own | our mpv config dir; `""` = the user's `~/.config/mpv` |

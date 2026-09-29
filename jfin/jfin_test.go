@@ -46,7 +46,7 @@ func TestLoginAndHeaderAuth(t *testing.T) {
 	if strings.Contains(loginAuth, `Token="tok123"`) {
 		t.Errorf("pre-login header leaked token: %s", loginAuth)
 	}
-	if !strings.Contains(loginAuth, `DeviceId="dev-uuid"`) || !strings.Contains(loginAuth, `Client="Jellyfin MPV Shim"`) {
+	if !strings.Contains(loginAuth, `DeviceId="dev-uuid"`) || !strings.Contains(loginAuth, `Client="Jellyfin MPV Shim - Go"`) {
 		t.Errorf("auth header missing identity: %s", loginAuth)
 	}
 

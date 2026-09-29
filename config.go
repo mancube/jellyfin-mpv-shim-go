@@ -16,7 +16,7 @@ import (
 type Settings struct {
 	Server        string `json:"server"` // e.g. http://localhost:8096
 	Username      string `json:"username"`
-	PlayerName    string `json:"player_name"`    // device name shown in the Jellyfin UI
+	PlayerName    string `json:"player_name"`    // device name in the Jellyfin UI (default: hostname)
 	ClientUUID    string `json:"client_uuid"`    // stable device id, generated on first run
 	MpvPath       string `json:"mpv_path"`       // empty = "mpv" from PATH
 	MpvConfigDir  string `json:"mpv_config_dir"` // empty = use the user's own mpv config dir
@@ -37,7 +37,7 @@ type Settings struct {
 
 func DefaultSettings() Settings {
 	return Settings{
-		PlayerName:  "mpv",
+		PlayerName:  hostName(),
 		MpvPath:     "mpv",
 		LocalKbps:   10000,
 		RemoteKbps:  25000,
@@ -64,6 +64,13 @@ func (s *Settings) Load(path string) error {
 		return err
 	}
 	s.Server = strings.TrimRight(strings.TrimSpace(s.Server), "/")
+	// Migration: "mpv" was the old default device name; configs written by
+	// older builds have it stored, so switch those to the hostname (nobody
+	// deliberately names their device "mpv") and write it back.
+	if s.PlayerName == "mpv" {
+		s.PlayerName = hostName()
+		_ = s.Save(path)
+	}
 	return nil
 }
 
@@ -105,6 +112,17 @@ func ConfigDir() (string, error) {
 		}
 		return filepath.Join(home, ".config", "mpv-shim"), nil
 	}
+}
+
+// hostName is the default device name, so the machine shows up in the
+// Jellyfin UI as itself ("livingroom-pc") rather than a generic "mpv".
+func hostName() string {
+	if h, err := os.Hostname(); err == nil {
+		if h = strings.TrimSpace(h); h != "" {
+			return h
+		}
+	}
+	return "mpv"
 }
 
 func newUUID() string {

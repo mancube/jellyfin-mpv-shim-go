@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,7 +39,7 @@ func TestSettingsLoadMissingFile(t *testing.T) {
 	if err := s.Load(filepath.Join(t.TempDir(), "nope.json")); err != nil {
 		t.Fatalf("missing file should not error: %v", err)
 	}
-	if s.PlayerName != "mpv" {
+	if s.PlayerName != hostName() {
 		t.Errorf("defaults not applied: %+v", s)
 	}
 }
@@ -50,5 +51,43 @@ func TestNewUUID(t *testing.T) {
 	}
 	if a[14] != '4' || !strings.ContainsAny(string(a[19]), "89ab") {
 		t.Errorf("not a v4 uuid: %q", a)
+	}
+}
+
+// A config written by an older build stored the old "mpv" default; loading it
+// migrates the device name to the hostname.
+func TestSettingsMigratesOldPlayerName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	old := `{"server":"http://x","player_name":"mpv","client_uuid":"u"}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var s Settings
+	if err := s.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if s.PlayerName != hostName() {
+		t.Errorf("PlayerName = %q, want %q", s.PlayerName, hostName())
+	}
+	// Migrated value is persisted, so the web UI shows the new name.
+	var reread Settings
+	if err := reread.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if reread.PlayerName != hostName() {
+		t.Errorf("migration not persisted: %q", reread.PlayerName)
+	}
+	// An explicit name is left alone.
+	path2 := filepath.Join(dir, "config2.json")
+	if err := os.WriteFile(path2, []byte(`{"player_name":"livingroom"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var s2 Settings
+	if err := s2.Load(path2); err != nil {
+		t.Fatal(err)
+	}
+	if s2.PlayerName != "livingroom" {
+		t.Errorf("explicit name overwritten: %q", s2.PlayerName)
 	}
 }

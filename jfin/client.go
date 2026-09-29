@@ -16,9 +16,10 @@ import (
 	"time"
 )
 
-// ClientName is what the web UI shows as the device client; kept identical to
-// upstream so UI affordances behave the same (PLAN.md §2.10).
-const ClientName = "Jellyfin MPV Shim"
+// ClientName is what the web UI shows as the device client: upstream's string
+// plus " - Go", so both shims are distinguishable in the session list while
+// the UI affordances behave the same (PLAN.md §2.10).
+const ClientName = "Jellyfin MPV Shim - Go"
 
 // Client is a small REST client for one Jellyfin server.
 type Client struct {
