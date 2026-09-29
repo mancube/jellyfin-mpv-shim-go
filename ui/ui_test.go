@@ -1,16 +1,19 @@
 package ui
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -434,4 +437,83 @@ func TestStandaloneWizardQuitsWithQ(t *testing.T) {
 		t.Error("q in the standalone wizard does not quit")
 	}
 	_ = next
+}
+
+// The console bridge: the server accepts clients and pushes snapshots, and the
+// model renders them.
+func TestConsoleServerBroadcast(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "console.sock")
+	srv, err := NewConsoleServer(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+	// wait until the server has registered the client
+	deadline := time.Now().Add(2 * time.Second)
+	for srv.Clients() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("server never registered the client")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	srv.Broadcast(ConsoleSnapshot{
+		Server: "http://x", State: "online", Title: "A Movie",
+		Playing: true, Position: 12, Duration: 100, Volume: 55, Lines: []string{"hello"},
+	})
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var snap ConsoleSnapshot
+	if err := json.Unmarshal(line, &snap); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if snap.Title != "A Movie" || snap.State != "online" || !snap.Playing || snap.Volume != 55 {
+		t.Errorf("snapshot = %+v", snap)
+	}
+
+	// The model renders it.
+	m := consoleModel{}
+	next, _ := m.Update(consoleSnapMsg(snap))
+	view := stripANSI(next.(consoleModel).View())
+	for _, want := range []string{"A Movie", "online", "0:12 / 1:40", "vol 55%", "hello"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("console view missing %q:\n%s", want, view)
+		}
+	}
+	// q closes the window.
+	if _, cmd := m.Update(keyMsg("q")); cmd == nil {
+		t.Error("q did not ask the console to quit")
+	}
+}
+
+// ShowConsole refuses when nothing is running, and does not need a terminal to
+// be present in the test environment.
+func TestShowConsoleNeedsRunningInstance(t *testing.T) {
+	err := ShowConsole("/bin/true", filepath.Join(t.TempDir(), "missing.sock"))
+	if err == nil {
+		t.Fatal("ShowConsole should fail when the instance is not running")
+	}
+	if !strings.Contains(err.Error(), "not running") {
+		t.Errorf("error = %v, want a clear 'not running' message", err)
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	if got := shellQuote("/a b/mpv-shim"); got != "'/a b/mpv-shim'" {
+		t.Errorf("shellQuote = %q", got)
+	}
+	if got := shellQuote("it's"); got != `'it'\''s'` {
+		t.Errorf("shellQuote with a quote = %q", got)
+	}
 }

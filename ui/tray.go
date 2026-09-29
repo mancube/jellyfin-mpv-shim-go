@@ -67,6 +67,13 @@ func RunTray(s *Session) bool {
 			}
 		}
 
+		showConsole := systray.AddMenuItem("Show Console", "Open a status window for this instance")
+		showConsole.Click(func() {
+			if s.OpenConsole != nil {
+				s.OpenConsole()
+			}
+		})
+
 		connection := systray.AddMenuItem("Disconnect", "Drop the connection, keep playing")
 		connection.Click(func() {
 			// One item, two actions: the label follows the state.

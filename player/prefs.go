@@ -93,9 +93,6 @@ func (m *menu) videoPrefsEntries() []menuEntry {
 	entries = append(entries,
 		menuEntry{fmt.Sprintf("Remote Transcode Quality: %.1f Mbps", float64(m.p.RemoteKbps())/1000), m.openRemoteQuality},
 		menuEntry{fmt.Sprintf("Local Transcode Quality: %.1f Mbps", float64(o.LocalKbps)/1000), m.openLocalQuality},
-		menuEntry{fmt.Sprintf("Subtitle Size: %d", o.SubSize), m.openSubtitleSize},
-		menuEntry{"Subtitle Position: " + o.SubPosition, m.openSubtitlePosition},
-		menuEntry{"Subtitle Color: " + o.SubColor, m.openSubtitleColor},
 		m.toggle("Transcode Hi10p to 8bit", o.TranscodeHi10p, m.setTranscodeHi10p),
 		m.toggle("Transcode HDR", o.TranscodeHDR, m.setTranscodeHDR),
 		m.toggle("Transcode Dolby Vision", o.TranscodeDolbyVision, m.setTranscodeDV),
@@ -112,29 +109,65 @@ func (m *menu) openPlayerPrefs() {
 	m.pushPrefs(playerPrefsTitle, m.playerPrefsEntries())
 }
 
-// playerPrefsEntries builds the Player Preferences rows.
+// playerPrefsEntries is the index of the player preference sub-pages: the flat
+// list outgrew a normal window, so it is grouped rather than scrolled or
+// shrunk.
 func (m *menu) playerPrefsEntries() []menuEntry {
+	return []menuEntry{
+		{"Playback  (auto play, seek steps, volume)", func() { m.push("Playback", m.playbackPrefsEntries(), 0) }},
+		{"Subtitles  (size, position, colour)", func() { m.push("Subtitles", m.subtitlePrefsEntries(), 0) }},
+		{"Intro & Credits  (skip behaviour)", func() { m.push("Intro & Credits", m.introPrefsEntries(), 0) }},
+		{"System  (OSC, mouse, logging, updates)", func() { m.push("System", m.systemPrefsEntries(), 0) }},
+	}
+}
+
+// openPlaybackPrefs: how playback behaves.
+func (m *menu) playbackPrefsEntries() []menuEntry {
 	o := m.p.Options()
-	entries := []menuEntry{
+	return []menuEntry{
 		m.toggle("Auto Play", o.AutoPlay, m.setAutoPlay),
 		m.toggle("Auto Fullscreen", o.Fullscreen, m.setFullscreenStart),
 		m.toggle("Media Key Seek", o.MediaKeySeek, m.setMediaKeySeek),
-		m.toggle("Enable OSC", o.EnableOSC, m.setEnableOSC),
 		m.toggle("Use Web Seek Pref", o.UseWebSeek, m.setUseWebSeek),
-		m.toggle("Write Logs to File", o.WriteLogs, m.setWriteLogs),
-		m.toggle("Check for Updates", o.CheckUpdates, m.setCheckUpdates),
+		menuEntry{"Seek Steps: " + seekStepLabel(o), m.openSeekSteps},
+		m.toggle("Remember Volume", o.RememberVolume, m.setRememberVolume),
+		menuEntry{idleStopLabel(o), m.openIdleStop},
+	}
+}
+
+// openSubtitlePrefs: subtitle appearance. It lives here instead of in Video
+// Preferences so that both pages stay short.
+func (m *menu) subtitlePrefsEntries() []menuEntry {
+	o := m.p.Options()
+	return []menuEntry{
+		menuEntry{fmt.Sprintf("Size: %d%%", o.SubSize), m.openSubtitleSize},
+		menuEntry{"Position: " + o.SubPosition, m.openSubtitlePosition},
+		menuEntry{"Colour: " + o.SubColor, m.openSubtitleColor},
+	}
+}
+
+// openIntroPrefs: intro/credits skipping.
+func (m *menu) introPrefsEntries() []menuEntry {
+	o := m.p.Options()
+	return []menuEntry{
 		m.toggle("Always Skip Intros", o.SkipIntroAlways, m.setSkipIntroAlways),
 		m.toggle("Ask to Skip Intros", o.SkipIntro, m.setSkipIntroAsk),
 		m.toggle("Always Skip Credits", o.SkipCreditsAlways, m.setSkipCreditsAlways),
 		m.toggle("Ask to Skip Credits", o.SkipCredits, m.setSkipCreditsAsk),
+	}
+}
+
+// openSystemPrefs: everything about the app itself.
+func (m *menu) systemPrefsEntries() []menuEntry {
+	o := m.p.Options()
+	return []menuEntry{
+		m.toggle("Enable OSC", o.EnableOSC, m.setEnableOSC),
 		m.toggle("Mouse Menu", o.MenuMouse, m.setMenuMouse),
-		m.toggle("Remember Volume", o.RememberVolume, m.setRememberVolume),
-		menuEntry{"Seek Steps: " + seekStepLabel(o), m.openSeekSteps},
-		menuEntry{idleStopLabel(o), m.openIdleStop},
+		m.toggle("Write Logs to File", o.WriteLogs, m.setWriteLogs),
 		menuEntry{"Log Level: " + o.LogLevel, m.openLogLevel},
 		m.toggle("Redact Tokens In Log", o.SanitizeOutput, m.setSanitizeOutput),
+		m.toggle("Check for Updates", o.CheckUpdates, m.setCheckUpdates),
 	}
-	return entries
 }
 
 // toggle renders a checkbox row.
@@ -176,14 +209,27 @@ func (m *menu) selectRow(i int) {
 	m.refresh()
 }
 
-// prefsEntries builds the rows of the preferences page we are in.
-func (m *menu) prefsEntries() (string, []menuEntry) {
-	m.mu.Lock()
-	title := m.frame.title
-	m.mu.Unlock()
+// prefPages are the pages a setting change re-renders in place.
+var prefPages = map[string]bool{
+	videoPrefsTitle: true, playerPrefsTitle: true,
+	"Playback": true, "Subtitles": true, "Intro & Credits": true, "System": true,
+}
+
+func isPrefPage(title string) bool { return prefPages[title] }
+
+// prefsEntries rebuilds the rows of a given preferences page.
+func (m *menu) prefsEntries(title string) (string, []menuEntry) {
 	switch title {
 	case playerPrefsTitle:
 		return title, m.playerPrefsEntries()
+	case "Playback":
+		return title, m.playbackPrefsEntries()
+	case "Subtitles":
+		return title, m.subtitlePrefsEntries()
+	case "Intro & Credits":
+		return title, m.introPrefsEntries()
+	case "System":
+		return title, m.systemPrefsEntries()
 	default:
 		return videoPrefsTitle, m.videoPrefsEntries()
 	}
@@ -201,8 +247,8 @@ func (m *menu) backToRoot() {
 		if !shown {
 			return
 		}
-		if title == videoPrefsTitle || title == playerPrefsTitle {
-			page, entries := m.prefsEntries()
+		if isPrefPage(title) {
+			page, entries := m.prefsEntries(title)
 			m.replaceFrame(page, entries)
 			return
 		}

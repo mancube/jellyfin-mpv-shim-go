@@ -178,15 +178,18 @@ sub-menus (transcode quality, subtitle size/colour/position, HDR/Hi10p/DVR
 toggles, auto-play, fullscreen, OSC, mouse menu, *remember volume & mute*, intro
 skipping …). Changes apply immediately and are written back to `config.json`.
 
-**Video Preferences** — remote *and* local transcode quality, subtitle
-size/colour/position, transcode Hi10p / HDR / Dolby Vision, direct paths, disable
-direct play, allow HEVC / force H.264 when transcoding.
+**Video Preferences** — remote *and* local transcode quality, transcode
+Hi10p / HDR / Dolby Vision, direct paths, disable direct play, allow HEVC /
+force H.264 when transcoding.
 
-**Player Preferences** — auto play, auto fullscreen, media-key seek, OSC, web seek
-preference, log file, update check, always/ask skip intros and credits, mouse
-menu, remember volume, **seek steps** (←/→ and ↑/↓), **stop when idle**
-(off / 15 min / 1 h / 3 h / 6 h / 24 h), **log level** and **redact tokens in
-the log**.
+**Player Preferences** is an index of sub-pages, so no page outgrows the window:
+
+- *Playback* — auto play, auto fullscreen, media-key seek, web seek preference,
+  **seek steps** (←/→ and ↑/↓), remember volume, **stop when idle**
+  (off / 15 min / 1 h / 3 h / 6 h / 24 h)
+- *Subtitles* — size, position, colour
+- *Intro & Credits* — always/ask to skip intros and credits
+- *System* — OSC, mouse menu, log file, **log level**, redact tokens, update check
 
 Settings that stay in `config.json` only (too fiddly for a menu): `key_bindings`,
 `lang_filter_*` / `language_config`, `path_substitutions`, `update_url`,

@@ -1385,7 +1385,7 @@ func TestPrefsMenuRerenders(t *testing.T) {
 	moveTo(h.pl, h.fm, videoPrefsTitle)
 	h.pl.Key("ok")
 	prefs := h.fm.lastText()
-	if !strings.Contains(prefs, "Subtitle Size") || !strings.Contains(prefs, "Transcode HDR") {
+	if !strings.Contains(prefs, "Direct Paths") || !strings.Contains(prefs, "Transcode HDR") {
 		t.Fatalf("video prefs = %q", prefs)
 	}
 	moveTo(h.pl, h.fm, "Transcode HDR")
@@ -1405,8 +1405,16 @@ func TestPrefsMenuRerenders(t *testing.T) {
 	}
 	moveTo(h.pl, h.fm, playerPrefsTitle)
 	h.pl.Key("ok")
-	if p := h.fm.lastText(); !strings.Contains(p, "Auto Play") || !strings.Contains(p, "Enable OSC") {
-		t.Errorf("player prefs = %q", p)
+	index := h.fm.lastText()
+	for _, want := range []string{"Playback", "Subtitles", "Intro & Credits", "System"} {
+		if !strings.Contains(index, want) {
+			t.Errorf("player prefs index missing %q:\n%s", want, index)
+		}
+	}
+	moveTo(h.pl, h.fm, "Playback")
+	h.pl.Key("ok")
+	if rows := strings.Count(h.fm.lastText(), "\n"); rows > 8 {
+		t.Errorf("playback page has %d rows, want <= 7:\n%s", rows, h.fm.lastText())
 	}
 }
 
@@ -1414,11 +1422,9 @@ func TestPrefsMenuRerenders(t *testing.T) {
 func TestSubtitleSizeMenuAppliesToMpv(t *testing.T) {
 	h := setup(t)
 	playOne(t, h, cfg())
-	h.pl.Key("menu")
-	moveTo(h.pl, h.fm, videoPrefsTitle)
-	h.pl.Key("ok") // Video Preferences
-	moveTo(h.pl, h.fm, "Subtitle Size")
-	h.pl.Key("ok") // Subtitle Size
+	gotoPlayerPage(t, h.pl, h.fm, "Subtitles")
+	moveTo(h.pl, h.fm, "Size")
+	h.pl.Key("ok")
 	if got := h.fm.lastText(); !strings.Contains(got, "Select Subtitle Size") {
 		t.Fatalf("subtitle size menu = %q", got)
 	}
@@ -1430,6 +1436,38 @@ func TestSubtitleSizeMenuAppliesToMpv(t *testing.T) {
 	if got := h.fm.prop("sub-scale"); got != "2.00" {
 		t.Errorf("mpv sub-scale = %v, want 2.00", got)
 	}
+}
+
+// gotoPlayerPage walks menu → Player Preferences → the named sub-page.
+func gotoPlayerPage(t *testing.T, pl *Player, fm *fakeMpv, page string) {
+	t.Helper()
+	pl.Key("menu")
+	moveTo(pl, fm, playerPrefsTitle)
+	pl.Key("ok")
+	if page == "" {
+		return // just the index page
+	}
+	moveTo(pl, fm, page)
+	pl.Key("ok")
+}
+
+// openPlayerPage gets to a Player Preferences sub-page from wherever the menu
+// currently is (so tests do not have to count "back" presses).
+func openPlayerPage(t *testing.T, pl *Player, fm *fakeMpv, page string) {
+	t.Helper()
+	// Make sure we are on the Player Preferences index from wherever we are.
+	if !strings.HasPrefix(fm.lastText(), "Main Menu") {
+		pl.Key("menu") // a previous walk closed the menu
+	}
+	if !strings.HasPrefix(fm.lastText(), playerPrefsTitle) {
+		moveTo(pl, fm, playerPrefsTitle)
+		pl.Key("ok")
+	}
+	if page == "" {
+		return // the index page itself
+	}
+	moveTo(pl, fm, page)
+	pl.Key("ok")
 }
 
 // moveTo selects a menu row by label, wrapping like the menu itself.
@@ -1678,19 +1716,24 @@ func TestMenuEscWalksUpTheTree(t *testing.T) {
 
 	h.pl.Key("menu")
 	at("Main Menu")
-	moveTo(h.pl, h.fm, videoPrefsTitle)
+	moveTo(h.pl, h.fm, playerPrefsTitle)
 	h.pl.Key("ok")
-	at(videoPrefsTitle)
-	moveTo(h.pl, h.fm, "Subtitle Size")
+	at(playerPrefsTitle)
+	moveTo(h.pl, h.fm, "Subtitles")
+	h.pl.Key("ok")
+	at("Subtitles")
+	moveTo(h.pl, h.fm, "Size")
 	h.pl.Key("ok")
 	at("Select Subtitle Size")
 	moveTo(h.pl, h.fm, "Huge")
 	h.pl.Key("ok")
-	at(videoPrefsTitle) // the change re-renders this page, it does not move
+	at("Subtitles") // the change re-renders this page, it does not move
 	h.pl.Key("back")
-	at("Main Menu") // one level up: the parent
+	at(playerPrefsTitle) // one level up: the parent
 	h.pl.Key("back")
-	at("<closed>") // and the root closes the menu
+	at("Main Menu") // and up again
+	h.pl.Key("back")
+	at("<closed>") // the root closes the menu
 }
 
 // The mouse script is always loaded (so `menu_mouse` can toggle it at runtime)
@@ -1836,7 +1879,10 @@ func TestRememberVolumeToggleInMenu(t *testing.T) {
 	h.pl.SetSaveFunc(func(o Options) { saved++ })
 
 	h.pl.Key("menu")
+	h.pl.Key("menu")
 	moveTo(h.pl, h.fm, playerPrefsTitle)
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Playback")
 	h.pl.Key("ok")
 	moveTo(h.pl, h.fm, "Remember Volume")
 	h.pl.Key("ok")
@@ -1909,18 +1955,23 @@ func TestOSDCoversTranscodeAndPlaybackSettings(t *testing.T) {
 		t.Errorf("LocalKbps = %d, want 3000", got)
 	}
 
-	// Player preferences: seek steps, idle stop, log level, redaction.
-	h.pl.Key("back")
-	moveTo(h.pl, h.fm, playerPrefsTitle)
-	h.pl.Key("ok")
-	playerPrefs := h.fm.lastText()
-	for _, want := range []string{"Seek Steps", "Stop When Idle", "Log Level", "Redact Tokens"} {
-		if !strings.Contains(playerPrefs, want) {
-			t.Errorf("player preferences missing %q:\n%s", want, playerPrefs)
+	// Player preferences is an index; the rows live on its sub-pages.
+	openPlayerPage(t, h.pl, h.fm, "") // the index itself: no row selected
+	index := h.fm.lastText()
+	for _, want := range []string{"Playback", "Subtitles", "Intro & Credits", "System"} {
+		if !strings.Contains(index, want) {
+			t.Errorf("player preferences index missing %q:\n%s", want, index)
 		}
 	}
 
-	// Seek steps: horizontal then vertical.
+	// Seek steps: horizontal then vertical, under Playback.
+	openPlayerPage(t, h.pl, h.fm, "Playback")
+	playback := h.fm.lastText()
+	for _, want := range []string{"Seek Steps", "Stop When Idle", "Remember Volume"} {
+		if !strings.Contains(playback, want) {
+			t.Errorf("playback page missing %q:\n%s", want, playback)
+		}
+	}
 	moveTo(h.pl, h.fm, "Seek Steps")
 	h.pl.Key("ok")
 	moveTo(h.pl, h.fm, "← / →")
@@ -1933,7 +1984,7 @@ func TestOSDCoversTranscodeAndPlaybackSettings(t *testing.T) {
 	}
 	// The label reflects it.
 	if v := h.fm.lastText(); !strings.Contains(v, "Seek Steps: 15 s / 60 s") {
-		t.Errorf("player preferences row not updated:\n%s", v)
+		t.Errorf("playback page row not updated:\n%s", v)
 	}
 }
 
@@ -1945,6 +1996,8 @@ func TestOSDIdleStopAndLogLevel(t *testing.T) {
 	h.pl.Key("menu")
 	moveTo(h.pl, h.fm, playerPrefsTitle)
 	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Playback")
+	h.pl.Key("ok")
 
 	moveTo(h.pl, h.fm, "Stop When Idle")
 	h.pl.Key("ok") // the submenu lists off / 15m / 1h / 3h / 6h / 24h
@@ -1955,6 +2008,8 @@ func TestOSDIdleStopAndLogLevel(t *testing.T) {
 		t.Errorf("idle stop = %v after %v, want true/6h", o.IdleStop, o.IdleStopAfter)
 	}
 
+	// The log level lives on the System page.
+	openPlayerPage(t, h.pl, h.fm, "System")
 	moveTo(h.pl, h.fm, "Log Level")
 	h.pl.Key("ok")
 	moveTo(h.pl, h.fm, "debug")
@@ -1962,7 +2017,8 @@ func TestOSDIdleStopAndLogLevel(t *testing.T) {
 	if got := h.pl.Options().LogLevel; got != "debug" {
 		t.Errorf("log level = %q, want debug", got)
 	}
-	// "off" in the submenu turns it off again.
+	// "off" in the idle submenu turns it off again.
+	openPlayerPage(t, h.pl, h.fm, "Playback")
 	moveTo(h.pl, h.fm, "Stop When Idle")
 	h.pl.Key("ok")
 	moveTo(h.pl, h.fm, "off")

@@ -52,6 +52,7 @@ func run() int {
 		fmt.Fprintln(fs.Output(), "Usage:")
 		fmt.Fprintln(fs.Output(), "  mpv-shim                                       play: session loop + TUI + tray")
 		fmt.Fprintln(fs.Output(), "  mpv-shim setup                                 TUI: add/remove accounts (password or Quick Connect)")
+		fmt.Fprintln(fs.Output(), "  mpv-shim --console                             status window for a running instance (tray mode)")
 		fmt.Fprintln(fs.Output(), "  mpv-shim login <server> <username> <password>   log in and store credentials")
 		fmt.Fprintln(fs.Output(), "  mpv-shim accounts [rm <index>]                  list/remove saved accounts")
 		fmt.Fprintln(fs.Output(), "\nFlags:")
@@ -63,6 +64,7 @@ func run() int {
 	password := fs.String("password", "", "password")
 	debug := fs.Bool("debug", false, "verbose logging")
 	headless := fs.Bool("headless", false, "no TUI: log to stdout only (daemon mode)")
+	consoleOnly := fs.Bool("console", false, "show the status window of a running instance and exit with it")
 	loginOnly := fs.Bool("login-only", false, "log in and exit")
 	statusOnly := fs.Bool("status", false, "print connection status and exit")
 	showVersion := fs.Bool("version", false, "print version and exit")
@@ -107,6 +109,11 @@ func run() int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	if *consoleOnly {
+		// Connects to the running instance's console socket.
+		return intErr(ui.RunConsoleClient(context.Background(), consoleSocket(cfgDir)))
+	}
 
 	switch sub {
 	case "login":
@@ -278,6 +285,29 @@ func mediaConfigLocked(s *Settings) jfin.MediaConfig {
 		LangFilterSub:        s.LangFilterSub,
 		LanguageRules:        rules,
 	}
+}
+
+// consoleSocket is where a "Show Console" window connects.
+func consoleSocket(cfgDir string) string { return filepath.Join(cfgDir, "console.sock") }
+
+// consoleSnapshot renders the state the console window shows.
+func consoleSnapshot(sess *session, note string) ui.ConsoleSnapshot {
+	st := sess.pl.Status()
+	snap := ui.ConsoleSnapshot{
+		Server: sess.account.Server, Device: sess.account.Username,
+		Title: st.Title, Playing: st.Playing, Paused: st.Paused,
+		Position: st.Position, Duration: st.Duration,
+		Volume: st.Volume, Muted: st.Mute, Lines: sess.logs.Tail(8), Note: note,
+	}
+	switch sess.ws.State() {
+	case jfin.StateConnected:
+		snap.State = "online"
+	case jfin.StateReconnecting:
+		snap.State = "reconnecting"
+	default:
+		snap.State = "offline"
+	}
+	return snap
 }
 
 // volumeMemory installs the app side of "remember volume and mute": reading the
@@ -574,6 +604,10 @@ func (sess *session) shutdown(ctx context.Context) {
 
 // runSession is the whole app for one account: the session loop plus, when
 // there is a terminal, the TUI status screen and the desktop tray.
+// runSession is the whole app for one account: the session loop, the console
+// bridge and — when there is a terminal — the TUI status screen and the tray.
+// Without a terminal it runs tray-only: the tray icon is the interface and
+// "Show Console" opens a status window on demand.
 func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfgDir, cfgPath string, interactive bool) int {
 	ring := ui.NewLogRing(200)
 	var out io.Writer = io.MultiWriter(ring, os.Stderr)
@@ -601,12 +635,31 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 	sess.start(sigCtx)
 	defer sess.shutdown(sigCtx)
 
-	if !interactive {
-		<-sigCtx.Done() // headless: logs only (daemon mode)
-		return 0
+	// The console bridge always runs: it is what the tray's "Show Console"
+	// opens, and in tray-only mode it is the whole interface.
+	sock := consoleSocket(cfgDir)
+	if cs, err := ui.NewConsoleServer(sock); err != nil {
+		lg.Printf("console: %v", err)
+	} else {
+		defer cs.Close()
+		go func() {
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-sigCtx.Done():
+					return
+				case <-t.C:
+					note := ""
+					if sess.pl.HasUpdate() {
+						note = "mpv-shim " + sess.pl.UpdateVersion() + " is available"
+					}
+					cs.Broadcast(consoleSnapshot(sess, note))
+				}
+			}
+		}()
 	}
 
-	quitOnce := sync.Once{}
 	uiSess := ui.NewSession(a, sess.ws, sess.pl, ring)
 	uiSess.ConfigDir = cfgDir
 	if s.WriteLog {
@@ -626,7 +679,18 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 		return ""
 	}
 	uiSess.OpenUpdatePage = sess.pl.OpenUpdatePage
+	uiSess.OpenConsole = func() {
+		self, err := os.Executable()
+		if err != nil {
+			lg.Printf("console: %v", err)
+			return
+		}
+		if err := ui.ShowConsole(self, sock); err != nil {
+			lg.Printf("console: %v", err)
+		}
+	}
 	// Quit = the whole app (session + mpv + TUI); Disconnect = session only.
+	quitOnce := sync.Once{}
 	uiSess.Quit = func() {
 		quitOnce.Do(func() {
 			stop()
@@ -641,6 +705,16 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 	uiSess.Disconnect = sess.disconnect
 	uiSess.Reconnect = func() { sess.start(sigCtx) }
 	uiSess.SetLogf(lg.Printf)
+
+	if !interactive {
+		// Tray-only: no TUI, the console window is the on-demand surface.
+		if ok := ui.RunTray(uiSess); !ok {
+			lg.Printf("tray: no system tray host found; running with logs only")
+		}
+		<-sigCtx.Done()
+		return 0
+	}
+
 	deps := ui.Deps{
 		Creds:    creds,
 		CredPath: credPath,
