@@ -6,6 +6,8 @@ package player
 // afterwards so the web UI's remote panel stays in sync (upstream's
 // timeline_handle()).
 
+import "mpv-shim/jfin"
+
 // Key bindings we claim at startup (upstream's kb_* defaults). The command is
 // an mpv script-message; Player.handleClientMessage routes it. A single
 // handler keeps the menu and the remote (GeneralCommand) on one code path.
@@ -23,6 +25,9 @@ var keyBindings = map[string]string{
 	"q":     "stop",
 	"<":     "prev",
 	">":     "next",
+	"w":     "watched",
+	"u":     "unwatched",
+	"s":     "screenshot",
 }
 
 // BindKeys claims the shim's keys. Called after mpv spawns.
@@ -64,6 +69,12 @@ func (p *Player) Key(action string) {
 		p.Next()
 	case "prev":
 		p.Prev()
+	case "watched":
+		p.WatchedSkip()
+	case "unwatched":
+		p.UnwatchedQuit()
+	case "screenshot":
+		p.Screenshot()
 	default:
 		p.log.Printf("key: unknown action %q", action)
 	}
@@ -121,7 +132,10 @@ func (p *Player) SetPaused(paused bool) {
 	p.pauseIgnore = paused
 	p.mpv.SetProperty("pause", paused)
 	p.lastPause = paused
-	p.sendProgressLocked()
+	p.touchLocked()
+	if p.PauseReport {
+		p.sendProgressLocked()
+	}
 }
 
 func (p *Player) TogglePause() {
@@ -145,6 +159,7 @@ func (p *Player) seekLocked(pos float64, absolute bool) {
 		flags = "absolute+exact"
 	}
 	p.lastSeek = pos
+	p.touchLocked()
 	if err := p.mpv.Command("seek", pos, flags); err != nil {
 		p.log.Printf("seek: %v", err)
 		return
@@ -153,9 +168,15 @@ func (p *Player) seekLocked(pos float64, absolute bool) {
 	p.sendProgressLocked()
 }
 
-// SetVolume sets the volume 0-100. Upstream only writes when the value
-// changed: the server spams SetVolume.
+// SetVolume sets the volume 0-100 (clamped). Upstream only writes when the
+// value changed: the server spams SetVolume.
 func (p *Player) SetVolume(pct int) {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if x, err := p.mpv.GetProperty("volume"); err == nil {
@@ -164,6 +185,7 @@ func (p *Player) SetVolume(pct int) {
 		}
 	}
 	p.mpv.SetProperty("volume", pct)
+	p.touchLocked()
 	p.sendProgressLocked()
 }
 
@@ -185,6 +207,7 @@ func (p *Player) SetMute(mute bool) {
 	defer p.mu.Unlock()
 	p.mpv.SetProperty("mute", mute)
 	p.lastMute = mute
+	p.touchLocked()
 	p.sendProgressLocked()
 }
 
@@ -233,6 +256,72 @@ func (p *Player) jumpLocked(delta int) {
 	p.sendStopped(true)
 	if err := p.playLocked(next, 0); err != nil {
 		p.log.Printf("play %d: %v", target, err)
+	}
+}
+
+// StepVolume changes the volume by delta (remote VolumeUp/VolumeDown).
+func (p *Player) StepVolume(delta int) {
+	p.SetVolume(p.GetVolume() + delta)
+}
+
+// ToggleMute flips mute (remote ToggleMute).
+func (p *Player) ToggleMute() {
+	p.mu.Lock()
+	x, err := p.mpv.GetProperty("mute")
+	p.mu.Unlock()
+	if err != nil {
+		return
+	}
+	if m, ok := x.(bool); ok {
+		p.SetMute(!m)
+	}
+}
+
+// Screenshot writes a frame to ScreenshotDir (remote TakeScreenshot).
+func (p *Player) Screenshot() {
+	p.mu.Lock()
+	dir := p.ScreenshotDir
+	p.mu.Unlock()
+	if dir == "" {
+		p.log.Printf("screenshot: no directory configured")
+		return
+	}
+	if err := p.mpv.Screenshot(dir); err != nil {
+		p.log.Printf("screenshot: %v", err)
+		return
+	}
+	p.mpv.ShowText("Screenshot saved", 2000, 1)
+}
+
+// WatchedSkip marks the current item watched and plays the next one
+// (upstream watched_skip, key `w`).
+func (p *Player) WatchedSkip() {
+	p.mu.Lock()
+	if p.media != nil {
+		v := p.media.Video
+		if err := v.M.C.SetPlayed(p.ctx, v.ID, true); err != nil {
+			p.log.Printf("set watched: %v", err)
+		}
+	}
+	p.mu.Unlock()
+	p.Next()
+}
+
+// UnwatchedQuit stops playback and marks the item unwatched (upstream
+// unwatched_quit, key `u`).
+func (p *Player) UnwatchedQuit() {
+	p.mu.Lock()
+	var v *jfin.Video
+	if p.media != nil {
+		v = p.media.Video
+	}
+	ctx := p.ctx
+	p.mu.Unlock()
+	p.Stop()
+	if v != nil {
+		if err := v.M.C.SetPlayed(ctx, v.ID, false); err != nil {
+			p.log.Printf("set unwatched: %v", err)
+		}
 	}
 }
 

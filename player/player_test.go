@@ -27,6 +27,7 @@ type fakeMpv struct {
 	texts       []string
 	binds       []string
 	cmds        []string
+	shots       []string
 	incarnation int
 	hookFn      func(string, json.RawMessage)
 	exit        chan struct{}
@@ -108,6 +109,12 @@ func (f *fakeMpv) Command(args ...any) error {
 		}
 	}
 	f.mu.Unlock()
+	return nil
+}
+func (f *fakeMpv) Screenshot(dir string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.shots = append(f.shots, dir)
 	return nil
 }
 func (f *fakeMpv) Incarnation() int {
@@ -672,5 +679,143 @@ func TestClientMessageOpensMenu(t *testing.T) {
 	h.fm.fire("client-message", []string{"other-script", "menu"})
 	if !h.pl.menu.Shown() {
 		t.Error("unrelated client-message closed/ignored the menu unexpectedly")
+	}
+}
+
+// --- M5: idle stop, watched/unwatched, screenshot, volume step ---
+
+func TestIdleStopAfterDelay(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetIdleStop(50 * time.Millisecond)
+
+	// Playing: the idle timer keeps resetting.
+	h.fm.SetProperty("time-pos", 1.0)
+	time.Sleep(120 * time.Millisecond)
+	h.pl.Tick()
+	if !h.pl.HasVideo() {
+		t.Fatal("idle stop fired during playback")
+	}
+
+	// Paused counts as idle upstream (idle_when_paused); abort the playback
+	// instead — the "no media" case must also stop.
+	h.pl.Stop()
+	if h.pl.HasVideo() {
+		t.Fatal("Stop did not clear the media")
+	}
+	h.pl.Tick() // resets the timer (stopLocked is activity)
+	_, _, stopped, _ := h.recs.snapshot()
+	n := len(stopped)
+	time.Sleep(120 * time.Millisecond)
+	h.pl.Tick()
+	_, _, stopped2, _ := h.recs.snapshot()
+	if len(stopped2) != n {
+		t.Errorf("idle stop reported another stop with no media: %d → %d", n, len(stopped2))
+	}
+}
+
+func TestIdleStopPausedStopsPlayback(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetIdleStop(30 * time.Millisecond)
+	h.pl.SetPaused(true)
+	time.Sleep(80 * time.Millisecond)
+	h.pl.Tick()
+	if h.pl.HasVideo() {
+		t.Error("paused playback was not stopped after the idle delay")
+	}
+	_, _, stopped, _ := h.recs.snapshot()
+	if len(stopped) == 0 {
+		t.Error("idle stop did not report a stop")
+	}
+}
+
+func TestWatchedSkipAndUnwatchedQuit(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	// `w` marks watched (recorded by the fake server) and advances.
+	h.pl.Key("watched")
+	waitFor(t, "watched", func() bool {
+		_, _, _, w := h.recs.snapshot()
+		return len(w) >= 1 && w[0] == "a"
+	})
+
+	// `u` stops and marks unwatched.
+	h.pl.Key("unwatched")
+	waitFor(t, "unwatched", func() bool {
+		_, _, _, w := h.recs.snapshot()
+		return len(w) >= 2 && w[1] == "a"
+	})
+	if h.pl.HasVideo() {
+		t.Error("unwatched quit did not stop playback")
+	}
+}
+
+func TestStepVolumeToggleMuteScreenshot(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.fm.SetProperty("volume", 50.0)
+	h.fm.SetProperty("mute", false)
+
+	h.pl.StepVolume(10)
+	if got := h.pl.GetVolume(); got != 60 {
+		t.Errorf("volume = %d, want 60", got)
+	}
+	h.pl.StepVolume(-20)
+	if got := h.pl.GetVolume(); got != 40 {
+		t.Errorf("volume = %d, want 40", got)
+	}
+	h.pl.ToggleMute()
+	if h.fm.prop("mute") != true {
+		t.Error("ToggleMute did not mute")
+	}
+	h.pl.ToggleMute()
+	if h.fm.prop("mute") != false {
+		t.Error("ToggleMute did not unmute")
+	}
+	h.pl.ScreenshotDir = "/tmp/shots"
+	h.pl.Screenshot()
+	h.fm.mu.Lock()
+	shots := append([]string(nil), h.fm.shots...)
+	h.fm.mu.Unlock()
+	if len(shots) != 1 || shots[0] != "/tmp/shots" {
+		t.Errorf("screenshot dirs = %v", shots)
+	}
+}
+
+// Simultaneous remote commands while playing must not deadlock or race
+// (PLAN M5 hardening: "simultaneous remote commands").
+func TestConcurrentRemoteCommands(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	ops := []func(){
+		func() { h.pl.TogglePause() },
+		func() { h.pl.SetVolume(30 + int(time.Now().Unix())%50) },
+		func() { h.pl.SetMute(true) },
+		func() { h.pl.SetMute(false) },
+		func() { h.pl.Seek(30, true) },
+		func() { h.pl.Key("menu") },
+		func() { h.pl.Key("back") },
+		func() { h.pl.Status() },
+		func() { h.pl.Tick() },
+		func() { h.pl.Next() },
+		func() { h.pl.Prev() },
+	}
+	done := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		go func(i int) {
+			defer func() { done <- struct{}{} }()
+			for n := 0; n < 20; n++ {
+				ops[(i+n)%len(ops)]()
+			}
+		}(i)
+	}
+	for i := 0; i < 8; i++ {
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatal("concurrent remote commands deadlocked")
+		}
 	}
 }

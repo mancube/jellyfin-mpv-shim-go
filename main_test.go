@@ -34,6 +34,10 @@ func (m *minimalMvp) LoadFile(ctx context.Context, u string) error {
 func (m *minimalMvp) Stop() error { return nil }
 func (m *minimalMvp) SetProperty(n string, v any) {
 	m.mu.Lock()
+	// mpv's IPC returns numbers as float64 and booleans as bool; mirror that.
+	if i, ok := v.(int); ok {
+		v = float64(i)
+	}
 	m.props[n] = v
 	m.mu.Unlock()
 }
@@ -42,10 +46,11 @@ func (m *minimalMvp) GetProperty(n string) (any, error) {
 	defer m.mu.Unlock()
 	return m.props[n], nil
 }
-func (m *minimalMvp) SubAdd(u string) error     { return nil }
-func (m *minimalMvp) Keybind(key, cmd string)   {}
-func (m *minimalMvp) Command(args ...any) error { return nil }
-func (m *minimalMvp) Incarnation() int          { return 1 }
+func (m *minimalMvp) SubAdd(u string) error       { return nil }
+func (m *minimalMvp) Keybind(key, cmd string)     {}
+func (m *minimalMvp) Command(args ...any) error   { return nil }
+func (m *minimalMvp) Incarnation() int            { return 1 }
+func (m *minimalMvp) Screenshot(dir string) error { return nil }
 func (m *minimalMvp) ShowText(t string, ms, level int) {
 }
 func (m *minimalMvp) Alive() bool { return true }
@@ -183,7 +188,7 @@ func TestHandlePlaystateAndGeneralCommand(t *testing.T) {
 
 	// GeneralCommand: volume, mute, navigation (opens the OSD menu).
 	handleGeneralCommand(pl, "SetVolume", json.RawMessage(`{"Volume":42}`))
-	if got := mvp.props["volume"]; got != 42 {
+	if got := mvp.props["volume"]; got != 42.0 {
 		t.Errorf("volume = %v, want 42", got)
 	}
 	handleGeneralCommand(pl, "Mute", json.RawMessage(`{}`))
@@ -204,4 +209,32 @@ func TestHandlePlaystateAndGeneralCommand(t *testing.T) {
 	if pl.HasVideo() {
 		t.Error("still playing after Stop")
 	}
+}
+
+func TestGeneralCommandExtras(t *testing.T) {
+	ts := playServer(t)
+	c := jfin.New(ts.URL, "test", "dev1", "1.0", false)
+	c.Token, c.UserID = "tok", "u"
+	mvp := newMinimalMvp()
+	pl := player.New(mvp, log.New(io.Discard, "", 0))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pl.Start(ctx)
+	handlePlay(ctx, c, pl, jfin.MediaConfig{LocalKbps: 10000, RemoteKbps: 25000}, playData(t, "PlayNow", "a"))
+
+	mvp.SetProperty("volume", 50.0)
+	mvp.SetProperty("mute", false)
+	handleGeneralCommand(pl, "VolumeUp", json.RawMessage(`{}`))
+	if got := mvp.props["volume"]; got != 55.0 {
+		t.Errorf("VolumeUp: volume = %v, want 55", got)
+	}
+	handleGeneralCommand(pl, "VolumeDown", json.RawMessage(`{}`))
+	if got := mvp.props["volume"]; got != 50.0 {
+		t.Errorf("VolumeDown: volume = %v, want 50", got)
+	}
+	handleGeneralCommand(pl, "ToggleMute", json.RawMessage(`{}`))
+	if mvp.props["mute"] != true {
+		t.Error("ToggleMute did not mute")
+	}
+	handleGeneralCommand(pl, "TakeScreenshot", json.RawMessage(`{}`))
 }

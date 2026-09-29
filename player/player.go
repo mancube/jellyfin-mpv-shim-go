@@ -44,6 +44,15 @@ type Player struct {
 	repMute   bool
 	repVolume float64
 	lastTick  time.Time
+	// idle-stop: when > 0, playback is stopped after this long without
+	// activity (upstream stop_idle + idle_cmd_delay).
+	idleStop     time.Duration
+	lastActivity time.Time
+	// ScreenshotDir is where TakeScreenshot writes frames.
+	ScreenshotDir string
+	// PauseReport mirrors the pause_report setting: report immediately when
+	// the remote pauses/unpauses.
+	PauseReport bool
 }
 
 // mpvEvent is one queued IPC event (the hook runs in the reader goroutine).
@@ -56,7 +65,7 @@ func New(mpv Mpv, lg *log.Logger) *Player {
 	if lg == nil {
 		lg = log.Default()
 	}
-	p := &Player{mpv: mpv, log: lg}
+	p := &Player{mpv: mpv, log: lg, PauseReport: true} // pause_report defaults on
 	p.menu = newMenu(p)
 	return p
 }
@@ -118,6 +127,36 @@ func (p *Player) Status() Status {
 	return s
 }
 
+// SetIdleStop enables the idle stop: after d without playback (or without
+// any activity) the player stops, as upstream's stop_idle does. 0 disables.
+func (p *Player) SetIdleStop(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.idleStop = d
+	p.lastActivity = time.Now()
+}
+
+// touchLocked resets the idle timer (any user/remote activity counts).
+func (p *Player) touchLocked() { p.lastActivity = time.Now() }
+
+// idleCheckLocked implements the idle stop. Called from Tick.
+func (p *Player) idleCheckLocked() {
+	if p.idleStop <= 0 || p.stopping {
+		return
+	}
+	active := p.media != nil && !p.aborted() && !p.lastPause
+	if active {
+		p.touchLocked()
+		return
+	}
+	if time.Since(p.lastActivity) < p.idleStop {
+		return
+	}
+	p.log.Printf("idle for %s — stopping playback", p.idleStop)
+	p.touchLocked()
+	p.stopLocked()
+}
+
 func (p *Player) HasVideo() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -171,6 +210,7 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	}
 	p.pauseIgnore = true
 	p.doNotHandlePause = true
+	p.touchLocked()
 	if err := p.mpv.EnsureRunning(p.ctx); err != nil {
 		p.doNotHandlePause = false
 		return err
@@ -498,6 +538,7 @@ func (p *Player) tickLoop(ctx context.Context) {
 func (p *Player) Tick() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.idleCheckLocked() // must run even with no media (that is the idle case)
 	if p.media == nil || !p.shouldSendTimeline {
 		return
 	}
@@ -515,6 +556,8 @@ func (p *Player) Tick() {
 		// While paused we still report volume/mute changes (the remote can
 		// change them mid-pause); the position does not move.
 		p.lastPause = pause
+		// NB: no touchLocked() — a paused player is idle, and the idle check
+		// is what eventually stops it (upstream idle_when_paused/stop_idle).
 		if p.volumeChangedLocked() {
 			p.reportLocked()
 		}

@@ -32,6 +32,7 @@ type Mpv interface {
 	ShowText(text string, ms, level int)
 	Keybind(key, cmd string) // bind a key to an mpv command ("" unbinds)
 	Command(args ...any) error
+	Screenshot(dir string) error
 	Alive() bool
 	Incarnation() int // spawn counter: changes when mpv (re)started
 	Graceful() bool
@@ -47,6 +48,7 @@ type ProcOpts struct {
 	ConfigDir  string // mpv --config-dir; empty = mpv's default (the user's)
 	AuthHeader string // Authorization header value, sent via --http-header-fields; empty disables
 	MediaKeys  bool
+	LogLevel   string // mpv --msg-level=all=<level> ("" = mpv default)
 	Log        *log.Logger
 }
 
@@ -67,6 +69,7 @@ type Proc struct {
 	cfgDir     string
 	authHeader string
 	mediaKeys  bool
+	logLevel   string
 	log        *log.Logger
 
 	spawnMu     sync.Mutex // serializes respawns
@@ -90,7 +93,7 @@ func NewProc(o ProcOpts) *Proc {
 	}
 	return &Proc{
 		path: o.Path, ipcDir: o.IPCDir, cfgDir: o.ConfigDir,
-		authHeader: o.AuthHeader, mediaKeys: o.MediaKeys, log: o.Log,
+		authHeader: o.AuthHeader, mediaKeys: o.MediaKeys, logLevel: o.LogLevel, log: o.Log,
 		pending: map[int64]chan *rpcMsg{},
 		death:   make(chan struct{}, 1),
 	}
@@ -158,6 +161,9 @@ func (p *Proc) spawn(ctx context.Context) error {
 			return err
 		}
 		args = append(args, "--config-dir="+p.cfgDir)
+	}
+	if p.logLevel != "" {
+		args = append(args, "--msg-level=all="+p.logLevel)
 	}
 	if p.mediaKeys {
 		args = append(args, "--input-media-keys=yes")
@@ -443,6 +449,21 @@ func (p *Proc) Keybind(key, cmd string) {
 // Command runs a raw mpv IPC command.
 func (p *Proc) Command(args ...any) error {
 	_, err := p.command(args...)
+	return err
+}
+
+// Screenshot writes a video frame into dir (upstream's TakeScreenshot).
+// mpv 0.41 dropped `screenshot-to-file` and the old flag/argument form: the
+// destination comes from the screenshot-template option now.
+func (p *Proc) Screenshot(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmpl := filepath.Join(dir, "shot-%03d.jpg")
+	if _, err := p.command("set_property", "screenshot-template", tmpl); err != nil {
+		return fmt.Errorf("screenshot-template: %w", err)
+	}
+	_, err := p.command("screenshot", "video")
 	return err
 }
 

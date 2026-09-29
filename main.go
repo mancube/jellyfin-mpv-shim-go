@@ -142,7 +142,7 @@ func run() int {
 				return 1
 			}
 		}
-		return runSession(&s, a, creds, credPath, !*headless && isTTY())
+		return runSession(&s, a, creds, credPath, cfgDir, !*headless && isTTY())
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected login, accounts, setup)\n", sub)
 		return 2
@@ -217,7 +217,7 @@ type session struct {
 }
 
 // newSession wires the client, mpv, player and WS event handlers.
-func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing) (*session, error) {
+func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, configDir string) (*session, error) {
 	client := jfin.New(a.Server, s.PlayerName, a.DeviceID, version, s.IgnoreSSL)
 	client.Token, client.UserID = a.AccessToken, a.UserID
 
@@ -232,9 +232,15 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing) (
 		ConfigDir:  s.MpvConfigDir,
 		AuthHeader: client.AuthHeader(),
 		MediaKeys:  s.MediaKeys,
+		LogLevel:   mpvLogLevel(s),
 		Log:        lg,
 	})
 	pl := player.New(proc, lg)
+	if s.IdleStop {
+		pl.SetIdleStop(time.Duration(s.IdleDelayS) * time.Second)
+	}
+	pl.PauseReport = s.PauseReport
+	pl.ScreenshotDir = filepath.Join(configDir, "screenshots")
 
 	mcfg := jfin.MediaConfig{
 		LocalKbps: s.LocalKbps, RemoteKbps: s.RemoteKbps,
@@ -259,16 +265,31 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing) (
 		}
 		var pr jfin.PlayRequest
 		switch d.Name {
-		case "PlayNow", "PlayNext", "PlayLast", "PlayInstantMix":
+		case "PlayNow", "PlayNext", "PlayLast", "PlayInstantMix", "PlayMediaSource":
 			var args struct {
-				Item    string   `json:"Item"`
-				ItemIDs []string `json:"ItemIds"`
+				Item                string   `json:"Item"`
+				ItemIds             []string `json:"ItemIds"`
+				MediaSourceId       string   `json:"MediaSourceId"`
+				AudioStreamIndex    *int     `json:"AudioStreamIndex"`
+				SubtitleStreamIndex *int     `json:"SubtitleStreamIndex"`
 			}
 			if json.Unmarshal(d.Arguments, &args) == nil {
 				if args.Item != "" {
-					args.ItemIDs = append(args.ItemIDs, args.Item)
+					args.ItemIds = append(args.ItemIds, args.Item)
 				}
-				pr = jfin.PlayRequest{PlayCommand: d.Name, ItemIDs: args.ItemIDs}
+				cmd := d.Name
+				if cmd == "PlayMediaSource" {
+					cmd = "PlayNow"
+				}
+				pr = jfin.PlayRequest{
+					PlayCommand:         cmd,
+					ItemIDs:             args.ItemIds,
+					AudioStreamIndex:    args.AudioStreamIndex,
+					SubtitleStreamIndex: args.SubtitleStreamIndex,
+				}
+				if args.MediaSourceId != "" {
+					pr.MediaSourceID = &args.MediaSourceId
+				}
 			}
 		default:
 			// Everything else is remote control of the current playback.
@@ -304,10 +325,19 @@ func (sess *session) run(ctx context.Context) {
 
 // runSession is the whole app for one account: the session loop plus, when
 // there is a terminal, the TUI status screen and the desktop tray.
-func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath string, interactive bool) int {
+func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfgDir string, interactive bool) int {
 	ring := ui.NewLogRing(200)
-	lg := log.New(io.MultiWriter(ring, os.Stderr), "", log.Flags())
-	sess, err := newSession(s, a, lg, ring)
+	var out io.Writer = io.MultiWriter(ring, os.Stderr)
+	if s.WriteLog {
+		if f, err := openLogFile(cfgDir); err != nil {
+			log.Printf("log file: %v", err)
+		} else {
+			defer f.Close()
+			out = io.MultiWriter(ring, os.Stderr, f)
+		}
+	}
+	lg := log.New(out, "", log.Flags())
+	sess, err := newSession(s, a, lg, ring, cfgDir)
 	if err != nil {
 		lg.Printf("%v", err)
 		return 1
@@ -462,6 +492,14 @@ func handleGeneralCommand(pl *player.Player, name string, args json.RawMessage) 
 		if a.Index != nil {
 			pl.SetStreams(nil, a.Index)
 		}
+	case "VolumeUp":
+		pl.StepVolume(5)
+	case "VolumeDown":
+		pl.StepVolume(-5)
+	case "ToggleMute":
+		pl.ToggleMute()
+	case "TakeScreenshot":
+		pl.Screenshot()
 	case "ToggleFullscreen", "":
 		pl.ToggleFullscreen()
 	case "DisplayContent":
@@ -485,6 +523,25 @@ func doSetup(s *Settings, creds *jfin.CredFile, credPath string) int {
 		},
 	}
 	return intErr(ui.RunSetup(deps))
+}
+
+// mpvLogLevel maps our log_level setting onto mpv's --msg-level. Our own log
+// has no levels; mpv's chat is the noisy part, so that is what we filter.
+func mpvLogLevel(s *Settings) string {
+	switch s.LogLevel {
+	case "quiet", "error", "warn", "info", "debug", "trace", "v":
+		return s.LogLevel
+	case "":
+		return ""
+	default:
+		return "info"
+	}
+}
+
+// openLogFile appends to <config dir>/mpv-shim.log (the write_log setting).
+func openLogFile(cfgDir string) (*os.File, error) {
+	return os.OpenFile(filepath.Join(cfgDir, "mpv-shim.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 }
 
 // isTTY reports whether stdout is a terminal (so the TUI can take it over).

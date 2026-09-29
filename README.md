@@ -37,4 +37,45 @@ go build -tags nosystray -o mpv-shim .
 Config lives in `<config dir>/config.json`, credentials in `cred.json`
 (`~/.config/mpv-shim/`, `%appdata%\mpv-shim\`, `~/Library/Application Support/mpv-shim/`).
 
-Status: M0–M4 done. M5 (hardening + release) in [PLAN.md](PLAN.md) §6.
+## Configuration
+
+`config.json` (all keys optional, defaults shown):
+
+| key | default | meaning |
+|---|---|---|
+| `server` | — | Jellyfin URL, e.g. `http://localhost:8096` |
+| `username` | — | last logged-in user |
+| `player_name` | `mpv` | device name shown in the Jellyfin web UI |
+| `client_uuid` | generated | stable device id |
+| `mpv_path` | `mpv` | mpv binary |
+| `mpv_config_dir` | mpv's own | our mpv config dir; `""` = the user's `~/.config/mpv` |
+| `local_kbps` / `remote_kbps` | 10000 / 25000 | requested transcode bitrate |
+| `transcode_h265` / `force_h264` | false / false | device-profile knobs |
+| `skip_intro` / `skip_credits` | false / false | auto-seek past intro/outro segments |
+| `idle_stop` | true | stop playback when idle |
+| `idle_delay_s` | 3600 | seconds of idleness (playing nothing, or paused) before that stop |
+| `pause_report` | true | report progress immediately on pause/unpause |
+| `ignore_ssl` | false | skip TLS verification |
+| `log_level` | `info` | mpv `--msg-level` (quiet/error/warn/info/debug) |
+| `write_log` | false | also append to `<config dir>/mpv-shim.log` |
+| `media_keys` | true | let mpv handle media keys |
+
+## Keys (in the mpv window)
+
+`c` menu · `arrows` seek (±5 s / ±60 s) · `SPACE` pause · `f` fullscreen ·
+`q` stop · `<` `>` previous/next · `w` mark watched + next · `u` stop + mark
+unwatched · `s` screenshot (saved to `<config dir>/screenshots/`). With the menu
+open the same keys navigate it; the web/mobile remote drives the same actions.
+
+## Release builds
+
+```sh
+CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -ldflags "-X main.version=1.0.0" -o dist/mpv-shim-linux-amd64 .
+CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -ldflags "-X main.version=1.0.0" -o dist/mpv-shim-linux-arm64 .
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-X main.version=1.0.0" -o dist/mpv-shim-windows-amd64.exe .
+# macOS needs cgo (Cocoa) for the tray — build on a Mac, or without it:
+CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -tags nosystray -ldflags "-X main.version=1.0.0" -o dist/mpv-shim-darwin-arm64 .
+```
+
+Status: M0–M5 implemented; see [progress.md](progress.md) for what is verified live
+and what still needs a manual pass.

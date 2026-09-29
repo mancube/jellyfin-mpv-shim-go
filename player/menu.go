@@ -77,8 +77,11 @@ func (m *menu) rootEntries(playing bool) []menuEntry {
 		e = append(e,
 			menuEntry{"Change Audio", func() { m.openAudio() }},
 			menuEntry{"Change Subtitles", func() { m.openSubtitle() }},
-			menuEntry{"Quit and Mark Unwatched", m.unwatchedQuit},
 		)
+		if m.p.ScreenshotDir != "" {
+			e = append(e, menuEntry{"Screenshot", m.p.Screenshot})
+		}
+		e = append(e, menuEntry{"Quit and Mark Unwatched", m.unwatchedQuit})
 	}
 	return append(e, menuEntry{"Close Menu", m.Hide})
 }
