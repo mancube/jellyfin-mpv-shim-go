@@ -148,7 +148,7 @@ type Video struct {
 	SubtitleUid map[int]int
 	SubtitleURL map[int]string
 	SubtitleEnc map[int]struct{}
-	// Intros fetched from MediaSegments (skip triggering is M3).
+	// Intros fetched from MediaSegments, used to skip intro/credits.
 	Intros     []Intro
 	introTried bool
 }
@@ -197,7 +197,7 @@ func (v *Video) PlaybackURL(ctx context.Context) (string, error) {
 	m := v.M
 	profile, err := DeviceProfile(ProfileOpts{
 		IsRemote:      !m.IsLocal,
-		VideoBitrate:  nil, // menu-driven override arrives with M3
+		VideoBitrate:  nil, // no per-session bitrate override (menu is minimal)
 		LocalKbps:     m.Cfg.LocalKbps,
 		RemoteKbps:    m.Cfg.RemoteKbps,
 		TranscodeH265: m.Cfg.TranscodeH265,
@@ -460,8 +460,7 @@ func (v *Video) TerminateTranscode(ctx context.Context) {
 	}
 }
 
-// GetIntro fetches intro/outro segments once (skip triggering is M3). Port
-// of upstream get_intro.
+// GetIntro fetches intro/outro segments once. Port of upstream get_intro.
 func (v *Video) GetIntro(ctx context.Context, sourceID string) error {
 	if v.introTried {
 		return nil

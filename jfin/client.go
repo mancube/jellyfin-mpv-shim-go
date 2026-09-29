@@ -1,6 +1,6 @@
 // Package jfin is the minimal Jellyfin client surface mpv-shim needs:
 // REST over the non-legacy MediaBrowser auth header (tokens never appear in
-// URLs), plus — from M1 on — the /socket websocket.
+// URLs), plus the /socket websocket (ws.go).
 package jfin
 
 import (

@@ -42,7 +42,8 @@ func (c *Client) CloseTranscode(ctx context.Context, playSessionID string) error
 		"&PlaySessionId="+url.PathEscape(playSessionID))
 }
 
-// CloseLiveStream closes a live stream (live TV; not used in M2).
+// CloseLiveStream closes a live stream (live TV is out of scope, but the
+// teardown call is here for parity with upstream).
 func (c *Client) CloseLiveStream(ctx context.Context, liveStreamID string) error {
 	return c.Post(ctx, "/LiveStreams/Close?liveStreamId="+url.PathEscape(liveStreamID), nil, nil)
 }

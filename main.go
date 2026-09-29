@@ -45,10 +45,10 @@ func run() int {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "mpv-shim %s — Jellyfin → mpv cast client\n\n", version)
 		fmt.Fprintln(fs.Output(), "Usage:")
+		fmt.Fprintln(fs.Output(), "  mpv-shim                                       play: session loop + TUI + tray")
+		fmt.Fprintln(fs.Output(), "  mpv-shim setup                                 TUI: add/remove accounts (password or Quick Connect)")
 		fmt.Fprintln(fs.Output(), "  mpv-shim login <server> <username> <password>   log in and store credentials")
 		fmt.Fprintln(fs.Output(), "  mpv-shim accounts [rm <index>]                  list/remove saved accounts")
-		fmt.Fprintln(fs.Output(), "  mpv-shim setup                                 TUI: add/remove accounts (password or Quick Connect)")
-		fmt.Fprintln(fs.Output(), "  mpv-shim                                       status (session loop from M2)")
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}

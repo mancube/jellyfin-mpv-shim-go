@@ -15,7 +15,7 @@ import (
 // Player is the playback state machine: it owns the current Media, drives
 // mpv through the Mpv interface, and reports sessions to Jellyfin. Port of
 // the core of upstream player.py (PlayerManager), minus menu/syncplay/
-// trickplay (M3–M4).
+// trickplay, syncplay and display mirroring (out of scope).
 type Player struct {
 	mpv Mpv
 	log *log.Logger
@@ -537,7 +537,7 @@ func (p *Player) handleEndFileLocked() {
 }
 
 // exitWatch reacts to mpv process death: graceful → stop report; crash →
-// respawn and resume (PLAN M2 DoD).
+// respawn and resume.
 func (p *Player) exitWatch(ctx context.Context) {
 	for {
 		select {
@@ -639,10 +639,9 @@ func (p *Player) tickLoop(ctx context.Context) {
 }
 
 // Tick sends a progress report. Port of the upstream timeline loop: it skips
-// while paused (pause reporting arrives with M3's pause echo) and marks the
-// item watched at ≥90%. It also carries the M3 feedback work upstream did with
-// property observers: pause/mute/volume changes and local seeks are reported
-// so the web UI's remote panel follows mpv.
+// while paused and marks the item watched at ≥90%. Like upstream's property
+// observers, it also reports pause/mute/volume changes and local seeks so the
+// web UI's remote panel follows mpv (see observe.go for the immediate path).
 func (p *Player) Tick() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -746,9 +745,8 @@ func (p *Player) volumeChangedLocked() bool {
 
 // introCheckLocked implements upstream's skip_intro/skip_credits: seek past
 // the segment once, and prompt ("Seek to Skip Intro") if only the prompt
-// setting applies. ponytail: the settings are single booleans (always-skip
-// vs prompt-only is not distinguished); add flags if that distinction is ever
-// wanted.
+// setting applies. Note: always-skip and prompt-only are the same boolean
+// here; add separate flags if that distinction is ever wanted.
 func (p *Player) introCheckLocked() {
 	if p.media == nil || p.aborted() || p.menu.Shown() {
 		return
