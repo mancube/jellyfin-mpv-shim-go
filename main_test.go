@@ -1,18 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"mpv-shim/jfin"
 	"mpv-shim/player"
+	"mpv-shim/ui"
 )
 
 // minimalMvp is just enough of player.Mpv for handlePlay tests.
@@ -311,5 +316,136 @@ func TestGeneralCommandSetVolumeFraction(t *testing.T) {
 	}
 	if got := mvp.props["volume"]; got != 70.0 {
 		t.Errorf("volume = %v, want 70", got)
+	}
+}
+
+// config → player options → config must be a no-op round trip: that is what
+// the OSD preference menus rely on when they write the settings back.
+func TestSettingsOptionsRoundTrip(t *testing.T) {
+	s := DefaultSettings()
+	s.SeekUp, s.SeekDown, s.SeekLeft, s.SeekRight = 120, -120, -15, 30
+	s.SeekHExact, s.MediaKeySeek, s.UseWebSeek = true, true, true
+	s.SubtitleSize, s.SubtitleColor, s.SubtitlePosition = 125, "#FFEE00EE", "top"
+	s.AutoPlay, s.Fullscreen, s.EnableOSC = false, false, false
+	s.SkipIntroAlways, s.SkipCredits = true, false
+	s.MenuMouse, s.WriteLog, s.CheckUpdates = false, true, false
+	s.TranscodeHi10p, s.TranscodeHDR, s.TranscodeDolbyVision = true, true, false
+	s.DirectPaths, s.RemoteDirectPaths = false, true // the menu must not merge these
+	s.RemoteKbps = 4000
+	s.KeyBindings = map[string]string{"c": "fullscreen"}
+
+	before := s
+	settingsMu.Lock()
+	applyOptionsToSettings(&s, playerOptionsLocked(&s))
+	settingsMu.Unlock()
+	if !reflect.DeepEqual(before, s) {
+		t.Errorf("round trip changed the settings:\nbefore %+v\nafter  %+v", before, s)
+	}
+}
+
+// A preference change (menu goroutine) concurrent with a Play (WS goroutine)
+// must not race: both touch the shared Settings.
+func TestSettingsConcurrentAccess(t *testing.T) {
+	ts := playServer(t)
+	c := jfin.New(ts.URL, "test", "dev1", "1.0", false)
+	c.Token, c.UserID = "tok", "u"
+	pl := player.New(newMinimalMvp(), log.New(io.Discard, "", 0))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pl.Start(ctx)
+
+	s := DefaultSettings()
+	pl.SetSaveFunc(func(o player.Options) { applyOptionsToSettings(&s, o) })
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	// "menu" side: flip preferences.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			o := player.DefaultOptions()
+			o.AutoPlay = i%2 == 0
+			o.SeekRight = float64(i)
+			// The production path: apply + persist under one lock.
+			if err := applyAndSave(&s, o, filepath.Join(t.TempDir(), "config.json")); err != nil {
+				return
+			}
+			_ = mediaConfig(&s)
+		}
+		close(stop)
+	}()
+	// "server" side: plays read the same settings.
+	for i := 0; i < 20; i++ {
+		handlePlay(ctx, c, pl, mediaConfig(&s), playData(t, "PlayNow", "a"))
+	}
+	wg.Wait()
+	<-stop
+}
+
+// syncWriter is a mutex-guarded log sink: the session logs from its own
+// goroutine while the test inspects it.
+type syncWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// Disconnect stops the socket loop but keeps the player usable, and a
+// reconnect starts the loop again (the tray item toggles between the two).
+func TestSessionDisconnectReconnect(t *testing.T) {
+	var logBuf syncWriter
+	lg := log.New(&logBuf, "", 0)
+	s := DefaultSettings()
+	sess, err := newSession(&s, jfin.Account{Server: "http://127.0.0.1:1", DeviceID: "d1"}, lg, ui.NewLogRing(10), t.TempDir(), filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sess.pl.Start(ctx)
+	defer sess.shutdown(ctx)
+
+	sess.start(ctx)
+	// The server is unreachable, so we should be in the reconnecting state.
+	deadline := time.Now().Add(2 * time.Second)
+	for sess.ws.State() != jfin.StateReconnecting {
+		if time.Now().After(deadline) {
+			t.Fatalf("state = %d, want reconnecting", sess.ws.State())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sess.disconnect()
+	if sess.connected() {
+		t.Error("still connected after disconnect")
+	}
+	// The player is untouched by a disconnect.
+	if sess.pl.Status().Playing {
+		t.Log("player reports playing (mpv alive) — fine")
+	}
+
+	// Reconnecting starts the loop again.
+	sess.start(ctx)
+	deadline = time.Now().Add(2 * time.Second)
+	for sess.ws.State() != jfin.StateReconnecting {
+		if time.Now().After(deadline) {
+			t.Fatalf("state after reconnect = %d, want reconnecting", sess.ws.State())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(logBuf.String(), "connecting to") {
+		t.Errorf("reconnect did not log a new attempt:\n%s", logBuf.String())
 	}
 }

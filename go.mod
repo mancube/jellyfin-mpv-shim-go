@@ -6,8 +6,8 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/coder/websocket v1.8.15
 	github.com/energye/systray v1.0.3
-	nhooyr.io/websocket v1.8.17
 )
 
 require (

@@ -4,8 +4,8 @@ package player
 
 import (
 	"bufio"
-
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +42,11 @@ type Mpv interface {
 	Kill()
 }
 
+// mouseLua is the embedded OSD-menu mouse script (upstream mouse.lua).
+//
+//go:embed mouse.lua
+var mouseLua []byte
+
 // ProcOpts configures one mpv process.
 type ProcOpts struct {
 	Path       string // mpv binary
@@ -49,6 +54,7 @@ type ProcOpts struct {
 	ConfigDir  string // mpv --config-dir; empty = mpv's default (the user's)
 	AuthHeader string // Authorization header value, sent via --http-header-fields; empty disables
 	MediaKeys  bool
+	MenuMouse  bool   // reserved: the mouse script is always loaded
 	LogLevel   string // mpv --msg-level=all=<level> ("" = mpv default)
 	Log        *log.Logger
 }
@@ -72,6 +78,7 @@ type Proc struct {
 	cfgDir     string
 	authHeader string
 	mediaKeys  bool
+	menuMouse  bool
 	logLevel   string
 	log        *log.Logger
 
@@ -98,7 +105,8 @@ func NewProc(o ProcOpts) *Proc {
 	}
 	return &Proc{
 		path: o.Path, ipcDir: o.IPCDir, cfgDir: o.ConfigDir,
-		authHeader: o.AuthHeader, mediaKeys: o.MediaKeys, logLevel: o.LogLevel, log: o.Log,
+		authHeader: o.AuthHeader, mediaKeys: o.MediaKeys, menuMouse: o.MenuMouse,
+		logLevel: o.LogLevel, log: o.Log,
 		pending: map[int64]chan *rpcMsg{},
 		death:   make(chan struct{}, 1),
 	}
@@ -170,6 +178,14 @@ func (p *Proc) spawn(ctx context.Context) error {
 			return err
 		}
 		args = append(args, "--config-dir="+p.cfgDir)
+	}
+	// The mouse script is always loaded and enabled/disabled at runtime through
+	// the shim-menu-enable message, so `menu_mouse` can be toggled from the OSD
+	// menu without restarting mpv (same design as upstream's mouse.lua).
+	if script, err := p.mouseScript(); err == nil {
+		args = append(args, "--script="+script)
+	} else {
+		p.log.Printf("mouse menu: %v", err)
 	}
 	if p.logLevel != "" {
 		args = append(args, "--msg-level=all="+p.logLevel)
@@ -501,6 +517,12 @@ func (p *Proc) Command(args ...any) error {
 // attributed; mpv echoes the id back.
 var observeIDs = map[string]int64{
 	"pause": 1, "mute": 2, "volume": 3, "seeking": 4, "time-pos": 5, "eof-reached": 6,
+}
+
+// mouseScript materialises mouse.lua into the IPC dir (mpv needs a real path).
+func (p *Proc) mouseScript() (string, error) {
+	name := filepath.Join(p.ipcDir, "mouse.lua")
+	return name, os.WriteFile(name, mouseLua, 0o600)
 }
 
 // Observe subscribes to a property; changes arrive as

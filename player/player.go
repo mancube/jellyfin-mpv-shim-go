@@ -46,6 +46,7 @@ type Player struct {
 	lastTick    time.Time
 	crashLoop   int             // consecutive crash restarts without playback progress
 	initialEcho map[string]bool // first property-change per prop is mpv's echo
+	prompted    bool            // intro "ask to skip" prompt already shown
 	lastReport  time.Time       // last progress report we sent (report throttling)
 	// idle-stop: when > 0, playback is stopped after this long without
 	// activity (upstream stop_idle + idle_cmd_delay).
@@ -53,6 +54,18 @@ type Player struct {
 	lastActivity time.Time
 	// ScreenshotDir is where TakeScreenshot writes frames.
 	ScreenshotDir string
+	// opt holds the runtime settings; save persists changes made by the OSD
+	// preference menus.
+	opt  Options
+	save func(Options)
+
+	// update check (upstream update_check.py)
+	updateURL     string
+	updateEnabled bool
+	updateNotify  bool
+	updMu         sync.Mutex
+	update        UpdateState
+	version       string
 	// PauseReport mirrors the pause_report setting: report immediately when
 	// the remote pauses/unpauses.
 	PauseReport bool
@@ -73,7 +86,12 @@ func New(mpv Mpv, lg *log.Logger) *Player {
 		lg = log.Default()
 	}
 	// pause_report defaults on; initialEcho collects mpv's subscribe echoes.
-	p := &Player{mpv: mpv, log: lg, PauseReport: true, initialEcho: map[string]bool{}}
+	p := &Player{
+		mpv: mpv, log: lg, PauseReport: true,
+		initialEcho:  map[string]bool{},
+		opt:          DefaultOptions(),
+		updateNotify: true, // notify_updates defaults on
+	}
 	p.menu = newMenu(p)
 	return p
 }
@@ -152,6 +170,7 @@ func (p *Player) idleCheckLocked() {
 	if p.idleStop <= 0 || p.stopping || p.media == nil {
 		return // nothing loaded: there is no playback to stop
 	}
+	// A paused player counts as idle; the stop below handles it.
 	if !p.aborted() && !p.lastPause {
 		p.touchLocked() // playing: not idle
 		return
@@ -162,6 +181,31 @@ func (p *Player) idleCheckLocked() {
 	p.log.Printf("idle for %s — stopping playback", p.idleStop)
 	p.touchLocked()
 	p.stopLocked()
+	if p.opt.ShellCmds.Idle != "" {
+		p.runShell("idle_cmd", p.opt.ShellCmds.Idle)
+	}
+}
+
+// timeoutLocked is how long we wait for mpv to report a duration.
+func (p *Player) timeoutLocked() time.Duration {
+	if p.opt.PlaybackTimeout > 0 {
+		return p.opt.PlaybackTimeout
+	}
+	return 30 * time.Second
+}
+
+// applySubtitleStyleLocked pushes sub-scale/sub-color/sub-pos after a file
+// load (mpv resets some of them per file).
+func (p *Player) applySubtitleStyleLocked() {
+	if p.opt.SubSize > 0 {
+		p.mpv.SetProperty("sub-scale", fmt.Sprintf("%.2f", float64(p.opt.SubSize)/100))
+	}
+	if p.opt.SubColor != "" {
+		p.mpv.SetProperty("sub-color", p.opt.SubColor)
+	}
+	if pos := subPos(p.opt.SubPosition); pos != "" {
+		p.mpv.SetProperty("sub-pos", pos)
+	}
 }
 
 func (p *Player) HasVideo() bool {
@@ -214,6 +258,11 @@ func (p *Player) afterSpawn(ctx context.Context) {
 // video output), and retrying forever just burns CPU and spawns processes.
 const maxCrashRestarts = 3
 
+// introSkipWindow is how close to the end of an intro/credits segment the
+// automatic skip (and the "ask to skip" prompt) kicks in. Upstream uses
+// settings.local_kbps-derived timing; 15 s matches its UX for most content.
+const introSkipWindow = 15 * time.Second
+
 // observedProps are the mpv properties we watch for immediate UI feedback.
 var observedProps = []string{"pause", "mute", "volume", "seeking", "time-pos", "aid", "sid"}
 
@@ -233,12 +282,16 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	}
 	p.shouldSendTimeline = false
 	p.start = time.Now()
+	p.runShell("pre_media_cmd", p.opt.ShellCmds.PreMedia)
 	url, err := v.PlaybackURL(p.ctx)
 	if err != nil {
 		return fmt.Errorf("playback url: %w", err)
 	}
 	if url == "" {
 		return errors.New("no playable URL")
+	}
+	if p.opt.LogDecisions {
+		p.log.Printf("Playing: %s", url)
 	}
 	p.pauseIgnore = true
 	p.doNotHandlePause = true
@@ -253,7 +306,7 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 		p.doNotHandlePause = false
 		return err
 	}
-	if !p.waitForDuration(30 * time.Second) {
+	if !p.waitForDuration(p.timeoutLocked()) {
 		p.doNotHandlePause = false
 		p.stopLocked()
 		return errors.New("timeout waiting for media")
@@ -265,6 +318,12 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	p.lastMute = false
 	p.watchedMarked = false
 	p.configureStreams()
+	p.applySubtitleStyleLocked()
+	if p.opt.Fullscreen {
+		p.mpv.SetProperty("fullscreen", true)
+	}
+	p.runShell("play_cmd", p.opt.ShellCmds.Play)
+	p.loadChaptersLocked()
 	if offset > 0 {
 		p.lastSeek = offset
 		p.lastPos = offset
@@ -310,6 +369,7 @@ func (p *Player) stopLocked() {
 	if err := v.M.C.SessionStopped(p.ctx, opts); err != nil {
 		p.log.Printf("session stopped: %v", err)
 	}
+	p.runShell("stop_cmd", p.opt.ShellCmds.Stop)
 }
 
 // InsertQueue adds ids to the queue (PlayNext after current, PlayLast at the
@@ -508,11 +568,13 @@ func (p *Player) handleEndFileLocked() {
 	v := m.Video
 	if !p.watchedMarked {
 		p.watchedMarked = true
-		if err := v.M.C.SetPlayed(p.ctx, v.ID, true); err != nil {
-			p.log.Printf("set watched: %v", err)
+		if p.opt.ForceSetPlayed || p.opt.AutoPlay {
+			if err := v.M.C.SetPlayed(p.ctx, v.ID, true); err != nil {
+				p.log.Printf("set watched: %v", err)
+			}
 		}
 	}
-	if m.HasNext() {
+	if m.HasNext() && p.opt.AutoPlay {
 		p.sendStopped(true)
 		next, err := m.Next(p.ctx)
 		if err != nil || next == nil {
@@ -534,6 +596,7 @@ func (p *Player) handleEndFileLocked() {
 		p.shouldSendTimeline = false
 		p.url = ""
 	}
+	p.runShell("media_ended_cmd", p.opt.ShellCmds.MediaEnded)
 }
 
 // exitWatch reacts to mpv process death: graceful → stop report; crash →
@@ -748,13 +811,15 @@ func (p *Player) volumeChangedLocked() bool {
 // setting applies. Note: always-skip and prompt-only are the same boolean
 // here; add separate flags if that distinction is ever wanted.
 func (p *Player) introCheckLocked() {
-	if p.media == nil || p.aborted() || p.menu.Shown() {
+	// Note: no menu check here — the menu pauses playback, so the paused
+	// branch of Tick already covers it, and asking the menu for its state
+	// while holding p.mu would invert the lock order.
+	if p.media == nil || p.aborted() {
 		return
 	}
-	cfg := p.media.Cfg
-	if !cfg.SkipIntro && !cfg.SkipCredits {
-		return
-	}
+	// Upstream splits "always skip" from "ask to skip"; both are honoured here:
+	// always → jump silently, ask → show the prompt.
+	o := p.opt
 	pos := p.lastPos
 	v := p.media.Video
 	for i := range v.Intros {
@@ -762,28 +827,41 @@ func (p *Player) introCheckLocked() {
 		if in.HasTriggered || pos < in.Start || pos > in.End {
 			continue
 		}
-		enabled := in.Type == "Outro" && cfg.SkipCredits
-		if in.Type != "Outro" {
-			enabled = cfg.SkipIntro
+		always, ask := o.SkipIntroAlways, o.SkipIntro
+		if in.Type == "Outro" {
+			always, ask = o.SkipCreditsAlways, o.SkipCredits
 		}
-		if !enabled {
+		if !always && !ask {
 			continue
 		}
-		in.HasTriggered = true
-		p.log.Printf("skipping %s: seek to %.1fs", in.Type, in.End)
-		if err := p.mpv.Command("seek", in.End, "absolute+exact"); err != nil {
-			p.log.Printf("intro skip: %v", err)
+		if always || in.End-pos <= introSkipWindow.Seconds() {
+			in.HasTriggered = true
+			p.log.Printf("skipping %s: seek to %.1fs", in.Type, in.End)
+			if err := p.mpv.Command("seek", in.End, "absolute+exact"); err != nil {
+				p.log.Printf("intro skip: %v", err)
+				return
+			}
+			msg := "Skipped Intro"
+			if in.Type == "Outro" {
+				msg = "Skipped Credits"
+			}
+			p.mpv.ShowText(msg, 3000, 1)
+			p.lastPos = in.End
+			p.reportLocked()
 			return
 		}
-		msg := "Skipped Intro"
-		if in.Type == "Outro" {
-			msg = "Skipped Credits"
+		// "Ask to skip": only prompt near the end of the segment.
+		if !p.prompted {
+			p.prompted = true
+			msg := "Seek to Skip Intro"
+			if in.Type == "Outro" {
+				msg = "Seek to Skip Credits"
+			}
+			p.mpv.ShowText(msg, 3000, 1)
 		}
-		p.mpv.ShowText(msg, 3000, 1)
-		p.lastPos = in.End
-		p.sendProgressLocked()
 		return
 	}
+	p.prompted = false
 }
 
 func abs(f float64) float64 {

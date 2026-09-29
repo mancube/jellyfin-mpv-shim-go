@@ -25,11 +25,13 @@ type menuFrame struct {
 }
 
 type menu struct {
-	p      *Player
-	mu     sync.Mutex // guards the menu state only; never held across p.mu
-	shown  bool
-	stacks []menuFrame
-	frame  menuFrame
+	p          *Player
+	mu         sync.Mutex // guards the menu state only; never held across p.mu
+	shown      bool
+	mouseBack  bool
+	prefsTitle string // which preferences frame we are in, for re-rendering
+	stacks     []menuFrame
+	frame      menuFrame
 	// saved OSD properties, restored on hide
 	savedColor       string
 	savedFontSize    int
@@ -38,6 +40,37 @@ type menu struct {
 
 func newMenu(p *Player) *menu {
 	return &menu{p: p, savedColor: "#C8000000", savedFontSize: 55, savedBorderStyle: "outline-and-shadow"}
+}
+
+// mouseSelect highlights the row under the pointer. Index 0 is the title
+// (rendered as "<-- back"), 1..n are the entries — upstream menu.mouse_select.
+func (m *menu) mouseSelect(idx int) {
+	m.mu.Lock()
+	if !m.shown {
+		m.mu.Unlock()
+		return
+	}
+	switch {
+	case idx <= 0:
+		m.mouseBack = true
+	case idx-1 < len(m.frame.entries):
+		m.mouseBack = false
+		m.frame.selected = idx - 1
+	}
+	m.mu.Unlock()
+	m.refresh()
+}
+
+// mouseClick activates whatever the pointer is over.
+func (m *menu) mouseClick() {
+	m.mu.Lock()
+	back := m.mouseBack
+	m.mu.Unlock()
+	if back {
+		m.Action("back")
+		return
+	}
+	m.Action("ok")
 }
 
 // Shown reports whether the menu is open (own lock: callers may hold p.mu).
@@ -67,6 +100,7 @@ func (m *menu) Show() {
 	// Required for osd-back-color to render as a filled box on mpv 0.36+.
 	m.p.mpv.SetProperty("osd-border-style", "background-box")
 	m.p.mpv.SetProperty("osc", false)
+	m.setMouseEnabled(true)
 	m.refresh()
 	m.p.SetPaused(true)
 }
@@ -78,12 +112,23 @@ func (m *menu) rootEntries(playing bool) []menuEntry {
 			menuEntry{"Change Audio", func() { m.openAudio() }},
 			menuEntry{"Change Subtitles", func() { m.openSubtitle() }},
 		)
+		if len(m.p.chapters()) > 0 {
+			e = append(e, menuEntry{"Chapters", m.openChapters})
+		}
 		if m.p.ScreenshotDir != "" {
 			e = append(e, menuEntry{"Screenshot", m.p.Screenshot})
 		}
+		if m.p.HasUpdate() {
+			e = append(e, menuEntry{"mpv-shim " + m.p.UpdateVersion() + " available", m.openUpdatePage})
+		}
 		e = append(e, menuEntry{"Quit and Mark Unwatched", m.unwatchedQuit})
 	}
-	return append(e, menuEntry{"Close Menu", m.Hide})
+	e = append(e,
+		menuEntry{videoPrefsTitle, m.openVideoPrefs},
+		menuEntry{playerPrefsTitle, m.openPlayerPrefs},
+		menuEntry{"Close Menu", m.Hide},
+	)
+	return e
 }
 
 // Hide closes the menu, restores the OSD and unpauses. Port of hide_menu.
@@ -103,8 +148,31 @@ func (m *menu) Hide() {
 	m.p.mpv.SetProperty("osd-back-color", color)
 	m.p.mpv.SetProperty("osd-font-size", size)
 	m.p.mpv.SetProperty("osd-border-style", border)
-	m.p.mpv.SetProperty("osc", true)
+	// Restore the OSC to the user's preference (upstream enable_osc), not to a
+	// hardcoded on.
+	if m.p.Options().EnableOSC {
+		m.p.mpv.SetProperty("osc", true)
+	} else {
+		m.p.mpv.SetProperty("osc", false)
+	}
+	m.setMouseEnabled(false)
 	m.p.SetPaused(false)
+}
+
+// setMouseEnabled tells the mouse script whether to track the pointer
+// (upstream's shim-menu-enable client message).
+func (m *menu) setMouseEnabled(on bool) {
+	if !m.p.Options().MenuMouse {
+		return
+	}
+	_ = m.p.mpv.Command("script-message", "shim-menu-enable", boolStr(on))
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "True"
+	}
+	return "False"
 }
 
 func (m *menu) saveOSDLocked() {
@@ -166,6 +234,7 @@ func (m *menu) Action(action string) {
 			return
 		}
 	}
+	m.mouseBack = false
 	m.mu.Unlock()
 	m.refresh()
 }
@@ -173,8 +242,24 @@ func (m *menu) Action(action string) {
 // push swaps in a submenu, remembering the current frame (upstream put_menu).
 func (m *menu) push(title string, entries []menuEntry, selected int) {
 	m.mu.Lock()
-	m.stacks = append(m.stacks, m.frame)
+	m.stacks = append(m.stacks, m.frame) // the page we came from = the parent
 	m.frame = menuFrame{title: title, entries: entries, selected: selected}
+	m.mu.Unlock()
+	m.refresh()
+}
+
+// replaceFrame redraws the *current* page with new entries, keeping the parent
+// link. A settings change re-renders the preferences page this way, so "back"
+// always walks one level up the tree instead of hopping to a duplicate of the
+// page we were already on.
+func (m *menu) replaceFrame(title string, entries []menuEntry) {
+	m.mu.Lock()
+	if !m.shown {
+		m.mu.Unlock()
+		return
+	}
+	m.frame = menuFrame{title: title, entries: entries, selected: 0}
+	m.mouseBack = false
 	m.mu.Unlock()
 	m.refresh()
 }
@@ -276,6 +361,9 @@ func (m *menu) refresh() {
 		return
 	}
 	text := m.frame.title
+	if m.mouseBack {
+		text = "(<--) " + text
+	}
 	for i, e := range m.frame.entries {
 		if i == m.frame.selected {
 			text += fmt.Sprintf("\n   **%s**", e.label)

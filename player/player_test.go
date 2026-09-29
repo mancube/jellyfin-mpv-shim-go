@@ -682,13 +682,28 @@ func TestKeyFallbackSeekWhenMenuClosed(t *testing.T) {
 }
 
 func TestIntroSkipOnce(t *testing.T) {
+	// "Ask to skip" (skip_intro): only near the end of the segment.
 	h := setup(t)
 	c := cfg()
 	c.SkipIntro = true
 	playOne(t, h, c)
 
-	h.fm.SetProperty("time-pos", 5.0)
+	h.fm.SetProperty("time-pos", 5.0) // intro is 0-30 s
 	before := h.fm.numCmds()
+	h.pl.Tick()
+	h.fm.mu.Lock()
+	cmds := strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if strings.Contains(cmds, "absolute") {
+		t.Errorf("skipped too early in ask mode: %q", cmds)
+	}
+	if txt := h.fm.lastText(); txt != "Seek to Skip Intro" {
+		t.Errorf("OSD text = %q, want the prompt", txt)
+	}
+
+	// Within the window it skips for real, once.
+	h.fm.SetProperty("time-pos", 20.0)
+	before = h.fm.numCmds()
 	h.pl.Tick()
 	h.fm.mu.Lock()
 	got := strings.Join(h.fm.cmds[before:], "|")
@@ -699,12 +714,32 @@ func TestIntroSkipOnce(t *testing.T) {
 	if txt := h.fm.lastText(); txt != "Skipped Intro" {
 		t.Errorf("OSD text = %q, want %q", txt, "Skipped Intro")
 	}
-	// Triggered once only.
 	before = h.fm.numCmds()
-	h.fm.SetProperty("time-pos", 6.0)
+	h.fm.SetProperty("time-pos", 21.0)
 	h.pl.Tick()
 	if h.fm.numCmds() != before {
 		t.Error("intro skip repeated after HasTriggered")
+	}
+}
+
+// "Always skip" (skip_intro_always) jumps as soon as the segment starts.
+func TestIntroSkipAlways(t *testing.T) {
+	h := setup(t)
+	c := cfg()
+	c.SkipIntro = true // the segments are fetched; the *option* decides how
+	playOne(t, h, c)
+	o := h.pl.Options()
+	o.SkipIntro, o.SkipIntroAlways = false, true // "always skip", no prompt
+	h.pl.SetOptions(o)
+
+	h.fm.SetProperty("time-pos", 1.0)
+	before := h.fm.numCmds()
+	h.pl.Tick()
+	h.fm.mu.Lock()
+	got := strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if !strings.Contains(got, "30") {
+		t.Errorf("always-skip did not seek to the intro end: %q", got)
 	}
 }
 
@@ -1235,5 +1270,464 @@ func TestReportedVolumeIsClamped(t *testing.T) {
 	_, pr, _, _ := h.recs.snapshot()
 	if got := pr[len(pr)-1].VolumeLevel; got != 100 {
 		t.Errorf("reported VolumeLevel = %d, want 100 (clamped)", got)
+	}
+}
+
+// --- settings: rebinding, seek steps, prefs menus ---------------------------
+
+// The keybinding table is the default set plus the user's overrides, and an
+// empty action unbinds a key.
+func TestKeyBindingOverrides(t *testing.T) {
+	o := DefaultOptions()
+	if _, ok := o.keyBindings()["c"]; !ok {
+		t.Fatal("default menu key missing")
+	}
+	o.Keys = map[string]string{"c": "fullscreen", "x": "menu", "q": ""}
+	got := o.keyBindings()
+	if got["c"] != "fullscreen" {
+		t.Errorf("c = %q, want fullscreen", got["c"])
+	}
+	if got["x"] != "menu" {
+		t.Errorf("x = %q, want menu", got["x"])
+	}
+	if _, ok := got["q"]; ok {
+		t.Error("q was explicitly unbound but is still bound")
+	}
+}
+
+// The arrow keys seek by the configured steps, and exact seeks ask mpv for a
+// keyframe-accurate jump.
+func TestConfigurableSeekSteps(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	o := h.pl.Options()
+	o.SeekLeft, o.SeekRight, o.SeekUp = -15, 30, 120
+	h.pl.SetOptions(o)
+
+	before := h.fm.numCmds()
+	h.pl.Key("right")
+	h.pl.Key("up")
+	h.fm.mu.Lock()
+	cmds := strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if !strings.Contains(cmds, "seek30relative") || !strings.Contains(cmds, "seek120relative") {
+		t.Errorf("configured steps not used: %q", cmds)
+	}
+
+	o.SeekHExact = true
+	h.pl.SetOptions(o)
+	before = h.fm.numCmds()
+	h.pl.Key("right")
+	h.fm.mu.Lock()
+	cmds = strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if !strings.Contains(cmds, "relative+exact") {
+		t.Errorf("exact seek flag missing: %q", cmds)
+	}
+}
+
+// The preferences menus render the current settings and a selection changes
+// them, applies where relevant, and persists.
+func TestPrefsMenusChangeSettings(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	var saved int
+	// The real callback shape: read the options it is handed and write them
+	// back. It must not call back into the player — that deadlocked the whole
+	// app when a preference was changed from the menu.
+	h.pl.SetSaveFunc(func(o Options) {
+		saved++
+		if o.TranscodeHDR {
+			saved += 100
+		}
+	})
+
+	// Drive the whole flow (open → Video Preferences → toggle → back out) from
+	// a goroutine: a deadlock here is the bug this test is about.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.pl.Key("menu")
+		moveTo(h.pl, h.fm, videoPrefsTitle)
+		h.pl.Key("ok")
+		moveTo(h.pl, h.fm, "Transcode HDR")
+		h.pl.Key("ok")
+		h.pl.Key("back")
+		h.pl.Key("back")
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("changing a preference deadlocked (the app froze)")
+	}
+
+	if !h.pl.Options().TranscodeHDR {
+		t.Error("Transcode HDR toggle did not take")
+	}
+	if saved != 101 {
+		t.Errorf("preference change not persisted with the new value (save called %d)", saved)
+	}
+}
+
+// The root menu carries both preference menus, and re-rendering a preference
+// menu shows the new state.
+func TestPrefsMenuRerenders(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetSaveFunc(func(Options) {})
+	h.pl.Key("menu")
+	root := h.fm.lastText()
+	if !strings.Contains(root, videoPrefsTitle) || !strings.Contains(root, playerPrefsTitle) {
+		t.Fatalf("prefs rows missing from the root menu:\n%s", root)
+	}
+	moveTo(h.pl, h.fm, videoPrefsTitle)
+	h.pl.Key("ok")
+	prefs := h.fm.lastText()
+	if !strings.Contains(prefs, "Subtitle Size") || !strings.Contains(prefs, "Transcode HDR") {
+		t.Fatalf("video prefs = %q", prefs)
+	}
+	moveTo(h.pl, h.fm, "Transcode HDR")
+	h.pl.Key("ok")
+	if got := h.fm.lastText(); !strings.Contains(got, "✔ Transcode HDR") {
+		t.Errorf("prefs menu not re-rendered with the new state:\n%s", got)
+	}
+	// Player preferences has the behaviour toggles.
+	for i := 0; i < 2; i++ { // back to the root menu
+		h.pl.Key("back")
+		if strings.Contains(h.fm.lastText(), "Main Menu") {
+			break
+		}
+	}
+	if !strings.Contains(h.fm.lastText(), "Main Menu") {
+		t.Fatalf("did not get back to the root menu:\n%s", h.fm.lastText())
+	}
+	moveTo(h.pl, h.fm, playerPrefsTitle)
+	h.pl.Key("ok")
+	if p := h.fm.lastText(); !strings.Contains(p, "Auto Play") || !strings.Contains(p, "Enable OSC") {
+		t.Errorf("player prefs = %q", p)
+	}
+}
+
+// The subtitle submenu changes mpv's sub-* properties straight away.
+func TestSubtitleSizeMenuAppliesToMpv(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, videoPrefsTitle)
+	h.pl.Key("ok") // Video Preferences
+	moveTo(h.pl, h.fm, "Subtitle Size")
+	h.pl.Key("ok") // Subtitle Size
+	if got := h.fm.lastText(); !strings.Contains(got, "Select Subtitle Size") {
+		t.Fatalf("subtitle size menu = %q", got)
+	}
+	moveTo(h.pl, h.fm, "Huge")
+	h.pl.Key("ok")
+	if got := h.pl.Options().SubSize; got != 200 {
+		t.Errorf("SubSize = %d, want 200", got)
+	}
+	if got := h.fm.prop("sub-scale"); got != "2.00" {
+		t.Errorf("mpv sub-scale = %v, want 2.00", got)
+	}
+}
+
+// moveTo selects a menu row by label, wrapping like the menu itself.
+func moveTo(pl *Player, fm *fakeMpv, label string) {
+	rows, sel := menuRows(fm.lastText())
+	target := -1
+	for i, r := range rows {
+		if strings.Contains(r, label) {
+			target = i
+			break
+		}
+	}
+	if target < 0 || sel == target {
+		return
+	}
+	steps := (target - sel + len(rows)) % len(rows)
+	key := "down"
+	if steps > len(rows)/2 { // go the short way
+		steps = len(rows) - steps
+		key = "up"
+	}
+	for i := 0; i < steps; i++ {
+		pl.Key(key)
+	}
+}
+
+// menuRows parses the rendered menu: the entry labels and the selected index
+// (the menu marks it with ** … **).
+func menuRows(text string) (rows []string, selected int) {
+	for i, line := range strings.Split(text, "\n") {
+		if i == 0 {
+			continue // the title
+		}
+		rows = append(rows, line)
+		if strings.Contains(line, "**") {
+			selected = len(rows) - 1
+		}
+	}
+	return rows, selected
+}
+
+// compareVersions orders dotted versions; the update check uses it.
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"1.2.3", "1.2.3", 0},
+		{"1.3.0", "1.2.9", 1},
+		{"1.2.0", "1.10.0", -1},
+		{"2.0", "1.9.9", 1},
+	}
+	for _, c := range cases {
+		if got := compareVersions(c.a, c.b); got != c.want {
+			t.Errorf("compareVersions(%q,%q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestUpdateCheckFindsNewerRelease(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"tag_name": "v9.9.9", "html_url": "https://example/releases/v9.9.9",
+		})
+	}))
+	defer srv.Close()
+
+	h := setup(t)
+	h.pl.SetVersion("0.1.0")
+	h.pl.SetUpdateURL(srv.URL)
+	h.pl.SetUpdateEnabled(true)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !h.pl.HasUpdate() {
+		if time.Now().After(deadline) {
+			t.Fatal("update check did not report the newer release")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := h.pl.UpdateVersion(); got != "v9.9.9" {
+		t.Errorf("UpdateVersion = %q, want v9.9.9", got)
+	}
+}
+
+// The update check must read *our* release feed, and stay quiet when the repo
+// has no releases yet (a 404 is the normal state for a fresh repo).
+func TestUpdateCheckQuietWhenNoReleases(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	h := setup(t)
+	h.pl.SetVersion("0.1.0")
+	h.pl.SetUpdateURL(srv.URL)
+	h.pl.SetUpdateEnabled(true)
+	time.Sleep(300 * time.Millisecond) // one request, no retries
+	if h.pl.HasUpdate() {
+		t.Errorf("update announced with no releases: %q", h.pl.UpdateVersion())
+	}
+}
+
+// A tag-only feed (no release objects) is understood too.
+func TestUpdateCheckFallsBackToTags(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/releases/latest") {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]string{{"name": "v2.0.0"}})
+	}))
+	defer srv.Close()
+	h := setup(t)
+	h.pl.SetVersion("0.1.0")
+	h.pl.SetUpdateURL(srv.URL + "/api/v1/repos/x/y/releases/latest")
+	h.pl.SetUpdateEnabled(true)
+	deadline := time.Now().Add(3 * time.Second)
+	for !h.pl.HasUpdate() {
+		if time.Now().After(deadline) {
+			t.Fatal("tag-only feed not picked up")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := h.pl.UpdateVersion(); got != "v2.0.0" {
+		t.Errorf("UpdateVersion = %q, want v2.0.0", got)
+	}
+}
+
+// An older release must not be announced.
+func TestUpdateCheckIgnoresOlderRelease(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v3.0.0", "html_url": "u"})
+	}))
+	defer srv.Close()
+	h := setup(t)
+	h.pl.SetVersion("9.9.9")
+	h.pl.SetUpdateURL(srv.URL)
+	h.pl.SetUpdateEnabled(true)
+	time.Sleep(300 * time.Millisecond)
+	if h.pl.HasUpdate() {
+		t.Error("an older release was announced as an update")
+	}
+}
+
+// The save callback runs while the player's lock is held, so it must receive
+// the options rather than reading them back (that was the freeze: the callback
+// re-entered Options() → self-deadlock → the whole app hung).
+func TestSaveCallbackGetsOptionsWithoutReentering(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	var got Options
+	var before time.Time
+	h.pl.SetSaveFunc(func(o Options) {
+		got = o
+		before = time.Now()
+	})
+	o := h.pl.Options()
+	o.SeekRight = 42
+	h.pl.SetOptions(o)
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, videoPrefsTitle)
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Subtitle Size")
+	h.pl.Key("ok")
+	h.pl.Key("down")
+	h.pl.Key("ok") // pick a size
+	if before.IsZero() {
+		t.Fatal("save callback never ran")
+	}
+	if got.SubSize == 0 {
+		t.Error("save callback received zero options")
+	}
+	// The values we set before opening the menu must still be there: the
+	// callback copies, it does not reset.
+	if got.SeekRight != 42 {
+		t.Errorf("save callback lost unrelated settings: seek_right = %v", got.SeekRight)
+	}
+	if got.SubSize == 0 || got.SubColor == "" {
+		t.Errorf("save callback got a half-filled Options: %+v", got)
+	}
+}
+
+// mpv's sub-pos counts *upwards from the bottom*: 100 is the default (bottom),
+// larger pushes further down. Getting this backwards renders "bottom" at the
+// top of the window (upstream SUBTITLE_POS has the same table).
+func TestSubPosMapping(t *testing.T) {
+	cases := map[string]string{
+		"bottom": "100", // the default
+		"":       "100", // unset = default
+		"middle": "80",
+		"top":    "0",
+		"junk":   "100",
+	}
+	for in, want := range cases {
+		if got := subPos(in); got != want {
+			t.Errorf("subPos(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The setting must reach mpv: bottom (default) is 100, top is 0.
+func TestApplySubtitleStylePosition(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	o := h.pl.Options()
+	o.SubPosition = "top"
+	h.pl.SetOptions(o)
+	if got := h.fm.prop("sub-pos"); got != "0" {
+		t.Errorf("sub-pos for top = %v, want 0", got)
+	}
+	o.SubPosition = "bottom"
+	h.pl.SetOptions(o)
+	if got := h.fm.prop("sub-pos"); got != "100" {
+		t.Errorf("sub-pos for bottom = %v, want 100", got)
+	}
+	o.SubPosition = "middle"
+	h.pl.SetOptions(o)
+	if got := h.fm.prop("sub-pos"); got != "80" {
+		t.Errorf("sub-pos for middle = %v, want 80", got)
+	}
+}
+
+// ESC walks up the menu tree, one level at a time. A setting change re-renders
+// the preferences page *in place*: it used to pop and re-push it, which left a
+// duplicate on the stack, so the first ESC landed on the same page again
+// instead of the parent.
+func TestMenuEscWalksUpTheTree(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetSaveFunc(func(Options) {})
+
+	title := func() string {
+		lines := strings.Split(h.fm.lastText(), "\n")
+		if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+			return "<closed>"
+		}
+		return lines[0]
+	}
+	at := func(want string) {
+		t.Helper()
+		if got := title(); got != want {
+			t.Fatalf("menu page = %q, want %q", got, want)
+		}
+	}
+
+	h.pl.Key("menu")
+	at("Main Menu")
+	moveTo(h.pl, h.fm, videoPrefsTitle)
+	h.pl.Key("ok")
+	at(videoPrefsTitle)
+	moveTo(h.pl, h.fm, "Subtitle Size")
+	h.pl.Key("ok")
+	at("Select Subtitle Size")
+	moveTo(h.pl, h.fm, "Huge")
+	h.pl.Key("ok")
+	at(videoPrefsTitle) // the change re-renders this page, it does not move
+	h.pl.Key("back")
+	at("Main Menu") // one level up: the parent
+	h.pl.Key("back")
+	at("<closed>") // and the root closes the menu
+}
+
+// The mouse script is always loaded (so `menu_mouse` can toggle it at runtime)
+// and the menu enables/disables it with the shim-menu-enable message, like
+// upstream. Toggling must not need an mpv restart.
+func TestMenuMouseToggleUsesClientMessage(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	o := h.pl.Options()
+	o.MenuMouse = true
+	h.pl.SetOptions(o)
+
+	before := h.fm.numCmds()
+	h.pl.Key("menu")
+	time.Sleep(50 * time.Millisecond)
+	h.pl.Key("back")
+	time.Sleep(50 * time.Millisecond)
+	h.fm.mu.Lock()
+	cmds := strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	// (the fake concatenates the command args without separators)
+	if !strings.Contains(cmds, "script-messageshim-menu-enableTrue") ||
+		!strings.Contains(cmds, "script-messageshim-menu-enableFalse") {
+		t.Errorf("mouse script not toggled with the menu: %q", cmds)
+	}
+
+	// With menu_mouse off, no mouse messages are sent at all.
+	o.MenuMouse = false
+	h.pl.SetOptions(o)
+	before = h.fm.numCmds()
+	h.pl.Key("menu")
+	time.Sleep(50 * time.Millisecond)
+	h.pl.Key("back")
+	time.Sleep(50 * time.Millisecond)
+	h.fm.mu.Lock()
+	cmds = strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if strings.Contains(cmds, "shim-menu-enable") {
+		t.Errorf("mouse script toggled although menu_mouse is off: %q", cmds)
 	}
 }

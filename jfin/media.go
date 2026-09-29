@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 )
@@ -20,6 +21,40 @@ type MediaConfig struct {
 	ForceH264     bool
 	SkipIntro     bool
 	SkipCredits   bool
+
+	// Device-profile codec knobs (upstream transcode_*/force_*_codec).
+	AlwaysTranscode      bool
+	TranscodeHi10p       bool
+	TranscodeHDR         bool
+	TranscodeDolbyVision bool
+	TranscodeHEVC        bool
+	TranscodeAV1         bool
+	Transcode4K          bool
+	ForceVideoCodec      string
+	ForceAudioCodec      string
+
+	// DirectPaths serves a local file for a remote server;
+	// PathSubstitutions maps a server path prefix to a local one.
+	DirectPaths       bool
+	RemoteDirectPaths bool
+	PathSubstitutions map[string]string
+
+	// Language selection: LangFilterAudio/LangFilterSub are comma lists
+	// ("und,eng,jpn"), LanguageRules is the ordered upstream rule list.
+	LangFilterAudio string
+	LangFilterSub   string
+	LanguageRules   []LanguageRule
+}
+
+// LanguageRule is one ordered auto-track rule (upstream language_config).
+type LanguageRule struct {
+	AudioLang string
+	SubLang   string
+	AudioNone bool
+	SubNone   bool
+	Enabled   bool
+	Priority  int
+	Note      string
 }
 
 // playlistItemID mints unique PlaylistItemIds (upstream get_seq).
@@ -149,7 +184,9 @@ type Video struct {
 	SubtitleURL map[int]string
 	SubtitleEnc map[int]struct{}
 	// Intros fetched from MediaSegments, used to skip intro/credits.
-	Intros     []Intro
+	Intros []Intro
+	// Chapters fetched lazily (upstream get_chapters), used by the OSD menu.
+	Chapters   []Chapter
 	introTried bool
 }
 
@@ -196,12 +233,21 @@ func (v *Video) PlaybackURL(ctx context.Context) (string, error) {
 	v.TerminateTranscode(ctx)
 	m := v.M
 	profile, err := DeviceProfile(ProfileOpts{
-		IsRemote:      !m.IsLocal,
-		VideoBitrate:  nil, // no per-session bitrate override (menu is minimal)
-		LocalKbps:     m.Cfg.LocalKbps,
-		RemoteKbps:    m.Cfg.RemoteKbps,
-		TranscodeH265: m.Cfg.TranscodeH265,
-		ForceH264:     m.Cfg.ForceH264,
+		IsRemote:             !m.IsLocal,
+		VideoBitrate:         nil, // no per-session bitrate override
+		LocalKbps:            m.Cfg.LocalKbps,
+		RemoteKbps:           m.Cfg.RemoteKbps,
+		TranscodeH265:        m.Cfg.TranscodeH265,
+		ForceH264:            m.Cfg.ForceH264,
+		AlwaysTranscode:      m.Cfg.AlwaysTranscode,
+		TranscodeHi10p:       m.Cfg.TranscodeHi10p,
+		TranscodeHDR:         m.Cfg.TranscodeHDR,
+		TranscodeDolbyVision: m.Cfg.TranscodeDolbyVision,
+		TranscodeHEVC:        m.Cfg.TranscodeHEVC,
+		TranscodeAV1:         m.Cfg.TranscodeAV1,
+		Transcode4K:          m.Cfg.Transcode4K,
+		ForceVideoCodec:      m.Cfg.ForceVideoCodec,
+		ForceAudioCodec:      m.Cfg.ForceAudioCodec,
 	})
 	if err != nil {
 		return "", err
@@ -235,7 +281,12 @@ func (v *Video) PlaybackURL(ctx context.Context) (string, error) {
 	if m.Cfg.SkipIntro || m.Cfg.SkipCredits {
 		v.GetIntro(ctx, v.MediaSource.ID)
 	}
+	// Language rules fill in the tracks the caller (or the caller of the
+	// caller) did not ask for explicitly — a manual or remote track choice must
+	// survive a restart.
+	hadAid, hadSid := v.Aid != nil, v.Sid != nil
 	v.MapStreams()
+	v.applyLanguageRules(hadAid, hadSid)
 	url := v.urlFromSource()
 	// If the picked source is unplayable, try the rest (upstream fallback
 	// loop).
@@ -307,10 +358,20 @@ func (v *Video) urlFromSource() string {
 	if ms == nil {
 		return ""
 	}
-	if (ms.Protocol == "Http" || ms.SupportsDirectPlay) && v.M.IsLocal && ms.Path != "" {
-		if p, ok := directPath(ms.Path); ok {
-			v.IsTranscode = false
-			return p
+	// Local file paths: always for a LAN server, and for a remote one when
+	// direct_paths/remote_direct_paths is on (upstream direct_paths +
+	// path_substitutions).
+	if ms.Path != "" {
+		local := v.M.IsLocal
+		substituted := v.substitutePath(ms.Path)
+		if !local && substituted != ms.Path {
+			local = v.M.Cfg.DirectPaths || v.M.Cfg.RemoteDirectPaths
+		}
+		if local {
+			if p, ok := directPath(substituted); ok {
+				v.IsTranscode = false
+				return p
+			}
 		}
 	}
 	if ms.SupportsDirectStream {
@@ -328,6 +389,120 @@ func (v *Video) urlFromSource() string {
 		return base + ms.TranscodingUrl
 	}
 	return ""
+}
+
+// applyLanguageRules picks aid/sid from the ordered language rules, then falls
+// back to the first stream whose language passes the filters. Port of upstream
+// language_config + lang_filter_audio/sub.
+func (v *Video) applyLanguageRules(hadAid, hadSid bool) {
+	ms := v.MediaSource
+	if ms == nil {
+		return
+	}
+	// 1) explicit rules, highest priority first, first match wins.
+	rules := append([]LanguageRule(nil), v.M.Cfg.LanguageRules...)
+	sort.SliceStable(rules, func(i, j int) bool { return rules[i].Priority > rules[j].Priority })
+	for _, r := range rules {
+		if !r.Enabled {
+			continue
+		}
+		matched := false
+		if (r.AudioLang != "" || r.AudioNone) && !hadAid {
+			if v.pickLanguage(r.AudioLang, r.AudioNone, "Audio") {
+				matched = true
+			}
+		}
+		if (r.SubLang != "" || r.SubNone) && !hadSid {
+			if v.pickLanguage(r.SubLang, r.SubNone, "Subtitle") {
+				matched = true
+			}
+		}
+		if matched {
+			return
+		}
+	}
+	// 2) no rule matched: apply the language filters, if configured. The list
+	// is a *filter* ("which languages may be used"), so we keep the first
+	// stream in file order whose language is in it.
+	if list := v.M.Cfg.LangFilterAudio; list != "" && !hadAid {
+		v.pickLanguage(list, false, "Audio")
+	}
+	if list := v.M.Cfg.LangFilterSub; list != "" && !hadSid {
+		if v.pickLanguage(list, false, "Subtitle") {
+			return
+		}
+		// Nothing matched: turn subtitles off, as upstream does.
+		off := -1
+		v.Sid = &off
+	}
+}
+
+// pickLanguage sets aid/sid to the first playable stream of the given type
+// whose language is in the list (or the "und" fallback). Returns whether it
+// found one. kind is "Audio" or "Subtitle".
+func (v *Video) pickLanguage(lang string, none bool, kind string) bool {
+	ms := v.MediaSource
+	if ms == nil {
+		return false
+	}
+	// "und" matches streams with no language tag.
+	var wanted []string
+	if lang != "" {
+		for _, l := range strings.Split(lang, ",") {
+			l = strings.TrimSpace(strings.ToLower(l))
+			if l != "" {
+				wanted = append(wanted, l)
+			}
+		}
+	}
+	if none && len(wanted) == 0 {
+		if kind == "Subtitle" {
+			off := -1
+			v.Sid = &off
+		}
+		return true
+	}
+	for _, s := range ms.MediaStreams {
+		if s.Type != kind {
+			continue
+		}
+		l := strings.ToLower(s.Language)
+		for _, w := range wanted {
+			if w == l || (w == "und" && l == "") {
+				idx := s.Index
+				if kind == "Audio" {
+					v.Aid = &idx
+				} else {
+					v.Sid = &idx
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// substitutePath rewrites a server path with the configured
+// path_substitutions map (longest prefix wins), returning "" when nothing
+// matched. Port of upstream _apply_path_substitutions.
+func (v *Video) substitutePath(path string) string {
+	if path == "" {
+		return path
+	}
+	if len(v.M.Cfg.PathSubstitutions) == 0 {
+		return path // no rules: unchanged
+	}
+	best := ""
+	original := path
+	for from, to := range v.M.Cfg.PathSubstitutions {
+		if from == "" || !strings.HasPrefix(original, from) {
+			continue
+		}
+		if len(from) > len(best) {
+			best, path = from, strings.Replace(original, from, to, 1)
+		}
+	}
+	return path
 }
 
 // directPath applies the upstream local-path rules: a path with a URI scheme
@@ -485,6 +660,24 @@ func (c *Client) GetItem(ctx context.Context, id string) (*Item, error) {
 	var item Item
 	err := c.Get(ctx, "/Users/"+c.UserID+"/Items/"+url.PathEscape(id), &item)
 	return &item, err
+}
+
+// GetItemChapters fetches the chapter markers for an item (upstream
+// get_chapters). They are not in the default field set.
+func (c *Client) GetItemChapters(ctx context.Context, id string) ([]Chapter, error) {
+	var item Item
+	path := "/Users/" + c.UserID + "/Items/" + url.PathEscape(id) + "?Fields=Chapters"
+	if err := c.Get(ctx, path, &item); err != nil {
+		return nil, err
+	}
+	out := make([]Chapter, 0, len(item.Chapters))
+	for _, ch := range item.Chapters {
+		if ch.ImageTag == "" {
+			continue // no preview image: upstream skips these too
+		}
+		out = append(out, Chapter{Name: ch.Name, StartTicks: ch.StartPositionTicks, ImageTag: ch.ImageTag})
+	}
+	return out, nil
 }
 
 // PlaybackRequest is the POST /Items/{id}/PlaybackInfo body.

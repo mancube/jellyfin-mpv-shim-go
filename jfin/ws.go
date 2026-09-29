@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // WSMessage is the /socket envelope (server → client).
@@ -38,6 +38,9 @@ type WS struct {
 
 	// HealthInterval is the /Sessions poll period (0 disables).
 	HealthInterval time.Duration
+	// RetryMins stops the reconnect loop after this many minutes without a
+	// connection (0 = retry forever). Upstream connect_retry_mins.
+	RetryMins int
 }
 
 // NewWS builds a WS client for c.
@@ -72,14 +75,22 @@ func (w *WS) Connected() bool { return w.live.Load() }
 // StateConnected). The tray renders it as the status dot.
 func (w *WS) State() int32 { return w.state.Load() }
 
+// SetState overrides the state. It exists for the UI tests; production code
+// drives the state from the connection lifecycle.
+func (w *WS) SetState(s int32) { w.state.Store(s) }
+
 // Run blocks until ctx is canceled, reconnecting forever.
 func (w *WS) Run(ctx context.Context) error {
 	backoff := time.Second
+	var firstAttempt time.Time
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		w.state.Store(StateReconnecting)
+		if firstAttempt.IsZero() {
+			firstAttempt = time.Now()
+		}
 		ok, err := w.connect(ctx)
 		if ctx.Err() != nil {
 			w.state.Store(StateOffline)
@@ -90,6 +101,13 @@ func (w *WS) Run(ctx context.Context) error {
 			backoff = min(backoff*2, 100*time.Second)
 		} else {
 			backoff = time.Second // reset only after a successful connect
+			firstAttempt = time.Time{}
+		}
+		if w.RetryMins > 0 && !firstAttempt.IsZero() &&
+			time.Since(firstAttempt) > time.Duration(w.RetryMins)*time.Minute {
+			w.log.Printf("ws: no connection after %d minutes; giving up", w.RetryMins)
+			w.state.Store(StateOffline)
+			return err
 		}
 		t := time.NewTimer(backoff)
 		select {

@@ -6,7 +6,11 @@ package player
 // afterwards so the web UI's remote panel stays in sync (upstream's
 // timeline_handle()).
 
-import "mpv-shim/jfin"
+import (
+	"strconv"
+
+	"mpv-shim/jfin"
+)
 
 // Key bindings we claim at startup (upstream's kb_* defaults). The command is
 // an mpv script-message; Player.handleClientMessage routes it. A single
@@ -38,12 +42,22 @@ func (p *Player) BindKeys() {
 }
 
 // handleClientMessage is the mpv client-message hook: our key bindings and
-// (later) lua scripts speak through it.
+// the mouse script speak through it.
 func (p *Player) handleClientMessage(args []string) {
 	if len(args) < 2 || args[0] != "shim-menu" {
 		return
 	}
-	p.Key(args[1])
+	switch args[1] {
+	case "select":
+		// mouse hover: highlight a row (upstream menu.mouse_select)
+		if n, err := strconv.Atoi(args[2]); err == nil {
+			p.menu.mouseSelect(n)
+		}
+	case "click":
+		p.menu.mouseClick()
+	default:
+		p.Key(args[1])
+	}
 }
 
 // Key is one key/remote action, shared by the mpv key bindings and the
@@ -63,6 +77,10 @@ func (p *Player) Key(action string) {
 		}
 	case "fullscreen":
 		p.ToggleFullscreen()
+	case "media-next":
+		p.mediaKeyNext()
+	case "media-prev":
+		p.mediaKeyPrev()
 	case "stop":
 		p.Stop()
 	case "next":
@@ -87,6 +105,28 @@ func (p *Player) MenuAction(action string) {
 		p.menu.Action(action)
 		return
 	}
+	// Upstream kb_seek: the arrow keys are seek steps, configurable.
+	p.mu.Lock()
+	o := p.opt
+	p.mu.Unlock()
+	seek := func(delta float64, vertical bool) {
+		if vertical {
+			p.seekBy(delta, o.SeekVExact)
+			return
+		}
+		if o.UseWebSeek {
+			// Honour the remote's own skip lengths when the server sent them.
+			back, fwd, ok := p.webSeekLengths()
+			if ok {
+				if action == "left" {
+					delta = back
+				} else if action == "right" {
+					delta = fwd
+				}
+			}
+		}
+		p.seekBy(delta, o.SeekHExact)
+	}
 	switch action {
 	case "home":
 		p.menu.Show()
@@ -94,14 +134,38 @@ func (p *Player) MenuAction(action string) {
 		// Upstream: ESC outside the menu leaves fullscreen.
 		p.setFullscreen(false)
 	case "up":
-		p.seekRelative(60)
+		seek(o.SeekUp, true)
 	case "down":
-		p.seekRelative(-60)
+		seek(o.SeekDown, true)
 	case "left":
-		p.seekRelative(-5)
+		seek(o.SeekLeft, false)
 	case "right":
-		p.seekRelative(5)
+		seek(o.SeekRight, false)
 	}
+}
+
+// seekBy seeks by delta seconds, keyframe-exact when asked (upstream
+// seek_h_exact/seek_v_exact).
+func (p *Player) seekBy(delta float64, exact bool) {
+	if exact {
+		p.seekExact(delta)
+		return
+	}
+	p.seekRelative(delta)
+}
+
+// seekExact is the keyframe-accurate variant of seekRelative.
+func (p *Player) seekExact(delta float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.media == nil || p.aborted() {
+		return
+	}
+	p.touchLocked()
+	if err := p.mpv.Command("seek", delta, "relative+exact"); err != nil {
+		p.log.Printf("exact seek %+v: %v", delta, err)
+	}
+	p.reportLocked()
 }
 
 // seekRelative seeks by delta seconds (mpv keybindings: arrows, jump keys).
@@ -124,7 +188,7 @@ func (p *Player) seekRelative(delta float64) {
 			p.lastPos = f
 		}
 	}
-	p.sendProgressLocked()
+	p.reportLocked()
 }
 
 func (p *Player) isPausedLocked() bool {
@@ -148,7 +212,7 @@ func (p *Player) SetPaused(paused bool) {
 	p.lastPause = paused
 	p.touchLocked()
 	if p.PauseReport {
-		p.sendProgressLocked()
+		p.reportLocked()
 	}
 }
 
@@ -188,7 +252,7 @@ func (p *Player) seekLocked(pos float64, absolute bool) {
 			}
 		}
 	}
-	p.sendProgressLocked()
+	p.reportLocked()
 }
 
 // SetVolume sets the volume 0-100 (clamped). Upstream only writes when the
@@ -220,14 +284,14 @@ func (p *Player) SetVolume(pct int) {
 		if f, ok := x.(float64); ok && int(f) == pct {
 			if changed { // we only unmuted
 				p.touchLocked()
-				p.sendProgressLocked()
+				p.reportLocked()
 			}
 			return // unchanged: no report (the server spams SetVolume)
 		}
 	}
 	p.mpv.SetProperty("volume", pct)
 	p.touchLocked()
-	p.sendProgressLocked()
+	p.reportLocked()
 }
 
 // GetVolume returns the current volume (percent).
@@ -249,7 +313,7 @@ func (p *Player) SetMute(mute bool) {
 	p.mpv.SetProperty("mute", mute)
 	p.lastMute = mute
 	p.touchLocked()
-	p.sendProgressLocked()
+	p.reportLocked()
 }
 
 // ToggleFullscreen flips the mpv fullscreen property.
@@ -307,6 +371,71 @@ func (p *Player) jumpLocked(delta int) {
 	if err := p.playLocked(next, 0); err != nil {
 		p.log.Printf("play %d: %v", target, err)
 	}
+}
+
+// mediaKeyNext/mediaKeyPrev implement the media keys: seek, or skip episodes
+// when media_key_seek is off (upstream handle_media_next/prev).
+func (p *Player) mediaKeyNext() {
+	p.mu.Lock()
+	seek := p.opt.MediaKeySeek
+	isIntro := p.isInIntroLocked()
+	p.mu.Unlock()
+	switch {
+	case isIntro:
+		p.skipIntro()
+	case seek:
+		p.MenuAction("right")
+	default:
+		p.Next()
+	}
+}
+
+func (p *Player) mediaKeyPrev() {
+	p.mu.Lock()
+	seek := p.opt.MediaKeySeek
+	p.mu.Unlock()
+	if seek {
+		p.MenuAction("left")
+		return
+	}
+	p.Prev()
+}
+
+func (p *Player) skipIntro() {
+	p.mu.Lock()
+	pos := p.lastPos
+	var end float64 = -1
+	if p.media != nil {
+		for i := range p.media.Video.Intros {
+			in := &p.media.Video.Intros[i]
+			if !in.HasTriggered && in.Type != "Outro" && pos >= in.Start && pos <= in.End {
+				end = in.End
+				in.HasTriggered = true
+				break
+			}
+		}
+	}
+	aborted := p.aborted()
+	p.mu.Unlock()
+	if end < 0 || aborted {
+		return
+	}
+	p.Seek(end, true)
+	p.mpv.ShowText("Skipped Intro", 3000, 1)
+}
+
+// isInIntroLocked reports whether playback is inside an unskipped intro.
+func (p *Player) isInIntroLocked() bool {
+	if p.media == nil {
+		return false
+	}
+	for i := range p.media.Video.Intros {
+		in := &p.media.Video.Intros[i]
+		if !in.HasTriggered && in.Type != "Outro" && p.lastPos >= in.Start && p.lastPos <= in.End {
+			return true
+		}
+	}
+	return false
 }
 
 // StepVolume changes the volume by delta (remote VolumeUp/VolumeDown).
@@ -382,7 +511,3 @@ func (p *Player) UnwatchedQuit() {
 		}
 	}
 }
-
-// sendProgressLocked posts a progress report after a remote/UI change
-// (upstream timeline_handle + send_timeline). No-op without media.
-func (p *Player) sendProgressLocked() { p.reportLocked() }

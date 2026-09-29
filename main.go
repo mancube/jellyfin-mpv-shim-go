@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,10 @@ import (
 )
 
 var version = "0.1.0-dev" // overridden via -ldflags "-X main.version=..."
+
+// defaultUpdateURL is where we look for releases of *this* project. Point
+// `update_url` in config.json somewhere else to use a different feed.
+const defaultUpdateURL = "https://git.nas.lan/api/v1/repos/ikac/jellyfin-mpv-shim-go/releases/latest"
 
 // logRemoteCommands mirrors every remote command we receive; -debug turns it on.
 // First thing to reach for when "the remote did the wrong thing".
@@ -135,7 +140,7 @@ func run() int {
 		if !ok {
 			// First run: offer the wizard when there is a terminal, else point
 			// at the CLI login.
-			if !*headless && isTTY() {
+			if !*headless && isTTY() { // otherwise: point at the CLI login
 				if rc := doSetup(&s, creds, credPath); rc != 0 {
 					return rc
 				}
@@ -148,7 +153,13 @@ func run() int {
 				return 1
 			}
 		}
-		return runSession(&s, a, creds, credPath, cfgDir, !*headless && isTTY())
+		interactive := !*headless && isTTY()
+		if !*headless && !interactive {
+			// No usable terminal (redirected stdin/stdout, a service, a
+			// pipeline): the TUI would render but never see a key press.
+			log.Printf("no interactive terminal on stdin/stdout — running headless; use a terminal for the TUI, or mpv-shim setup in one")
+		}
+		return runSession(&s, a, creds, credPath, cfgDir, *configPath, interactive)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected login, accounts, setup)\n", sub)
 		return 2
@@ -219,11 +230,119 @@ type session struct {
 	logs    *ui.LogRing
 	ipcDir  string
 	lg      *log.Logger
-	cancel  context.CancelFunc
+
+	mu     sync.Mutex // guards cancel (start/disconnect)
+	cancel context.CancelFunc
 }
 
 // newSession wires the client, mpv, player and WS event handlers.
-func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, configDir string) (*session, error) {
+// settingsMu guards Settings: the OSD preference menus write it (from the menu
+// event goroutine) while Play handlers read it (from their own goroutines).
+var settingsMu sync.Mutex
+
+// mediaConfig maps the config onto the media/device-profile options.
+func mediaConfig(s *Settings) jfin.MediaConfig {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	return mediaConfigLocked(s)
+}
+
+func mediaConfigLocked(s *Settings) jfin.MediaConfig {
+	rules := make([]jfin.LanguageRule, 0, len(s.LanguageConfig))
+	for _, r := range s.LanguageConfig {
+		rules = append(rules, jfin.LanguageRule{
+			AudioLang: r.AudioLang, SubLang: r.SubLang,
+			AudioNone: r.AudioNone, SubNone: r.SubNone,
+			Enabled: r.Enabled, Priority: r.Priority, Note: r.Note,
+		})
+	}
+	return jfin.MediaConfig{
+		LocalKbps: s.LocalKbps, RemoteKbps: s.RemoteKbps,
+		TranscodeH265: s.TranscodeH265, ForceH264: s.ForceH264,
+		SkipIntro: s.SkipIntro, SkipCredits: s.SkipCredits,
+		AlwaysTranscode:      s.AlwaysTranscode,
+		TranscodeHi10p:       s.TranscodeHi10p,
+		TranscodeHDR:         s.TranscodeHDR,
+		TranscodeDolbyVision: s.TranscodeDolbyVision,
+		TranscodeHEVC:        s.TranscodeHEVC,
+		TranscodeAV1:         s.TranscodeAV1,
+		Transcode4K:          s.Transcode4K,
+		ForceVideoCodec:      s.ForceVideoCodec,
+		ForceAudioCodec:      s.ForceAudioCodec,
+		DirectPaths:          s.DirectPaths,
+		RemoteDirectPaths:    s.RemoteDirectPaths,
+		PathSubstitutions:    s.PathSubstitutions,
+		LangFilterAudio:      s.LangFilterAudio,
+		LangFilterSub:        s.LangFilterSub,
+		LanguageRules:        rules,
+	}
+}
+
+// applyAndSave persists a preference-menu change atomically.
+func applyAndSave(s *Settings, o player.Options, cfgPath string) error {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	applyOptionsToSettings(s, o)
+	return s.Save(cfgPath)
+}
+
+// playerOptions maps the config onto the player's runtime options.
+func playerOptions(s *Settings) player.Options {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	return playerOptionsLocked(s)
+}
+
+func playerOptionsLocked(s *Settings) player.Options {
+	o := player.DefaultOptions()
+	o.Keys = s.Keys()
+	o.SeekUp, o.SeekDown, o.SeekLeft, o.SeekRight = s.SeekUp, s.SeekDown, s.SeekLeft, s.SeekRight
+	o.SeekHExact, o.SeekVExact = s.SeekHExact, s.SeekVExact
+	o.UseWebSeek = s.UseWebSeek
+	o.MediaKeySeek = s.MediaKeySeek
+	o.SubSize, o.SubColor, o.SubPosition = s.SubtitleSize, s.SubtitleColor, s.SubPosition()
+	o.AutoPlay, o.Fullscreen, o.EnableOSC = s.AutoPlay, s.Fullscreen, s.EnableOSC
+	o.ForceSetPlayed = s.ForceSetPlayed
+	o.PlaybackTimeout = time.Duration(s.PlaybackTimeoutS) * time.Second
+	o.IdleCmdDelay = time.Duration(s.IdleCmdDelayS) * time.Second
+	o.LogDecisions = s.LogDecisions
+	o.RemoteKbps = s.RemoteKbps
+	o.SkipIntro, o.SkipCredits = s.SkipIntro, s.SkipCredits
+	o.SkipIntroAlways, o.SkipCreditsAlways = s.SkipIntroAlways, s.SkipCreditsAlways
+	o.MenuMouse, o.WriteLogs, o.CheckUpdates = s.MenuMouse, s.WriteLog, s.CheckUpdates
+	o.TranscodeHi10p, o.TranscodeHDR, o.TranscodeDolbyVision = s.TranscodeHi10p, s.TranscodeHDR, s.TranscodeDolbyVision
+	o.DirectPaths, o.RemoteDirectPaths = s.DirectPaths, s.RemoteDirectPaths
+	o.ShellCmds = player.ShellCmds{
+		PreMedia: s.PreMediaCmd, Play: s.PlayCmd, Stop: s.StopCmd,
+		MediaEnded: s.MediaEndedCmd, Idle: s.IdleCmd, IdleEnded: s.IdleEndedCmd,
+	}
+	return o
+}
+
+// applyOptionsToSettings copies the player's runtime options back into the
+// config, so a change made in the OSD preference menus survives a restart.
+// applyOptionsToSettings copies runtime options back into the config. Callers
+// hold settingsMu (see applyAndSave).
+func applyOptionsToSettings(s *Settings, o player.Options) {
+	s.SeekUp, s.SeekDown, s.SeekLeft, s.SeekRight = o.SeekUp, o.SeekDown, o.SeekLeft, o.SeekRight
+	s.SeekHExact, s.SeekVExact, s.UseWebSeek = o.SeekHExact, o.SeekVExact, o.UseWebSeek
+	s.MediaKeySeek = o.MediaKeySeek
+	s.SubtitleSize, s.SubtitleColor, s.SubtitlePosition = o.SubSize, o.SubColor, o.SubPosition
+	s.AutoPlay, s.Fullscreen, s.EnableOSC = o.AutoPlay, o.Fullscreen, o.EnableOSC
+	s.ForceSetPlayed = o.ForceSetPlayed
+	s.SkipIntro, s.SkipIntroAlways = o.SkipIntro, o.SkipIntroAlways
+	s.SkipCredits, s.SkipCreditsAlways = o.SkipCredits, o.SkipCreditsAlways
+	s.MenuMouse, s.WriteLog, s.CheckUpdates = o.MenuMouse, o.WriteLogs, o.CheckUpdates
+	s.TranscodeHi10p, s.TranscodeHDR = o.TranscodeHi10p, o.TranscodeHDR
+	s.TranscodeDolbyVision = o.TranscodeDolbyVision
+	s.DirectPaths, s.RemoteDirectPaths = o.DirectPaths, o.RemoteDirectPaths
+	s.RemoteKbps = o.RemoteKbps
+	if len(o.Keys) > 0 {
+		s.KeyBindings = o.Keys
+	}
+}
+
+func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, configDir, cfgPath string) (*session, error) {
 	client := jfin.New(a.Server, s.PlayerName, a.DeviceID, version, s.IgnoreSSL)
 	client.Token, client.UserID = a.AccessToken, a.UserID
 
@@ -238,25 +357,51 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 		ConfigDir:  s.MpvConfigDir,
 		AuthHeader: client.AuthHeader(),
 		MediaKeys:  s.MediaKeys,
+		MenuMouse:  s.MenuMouse,
 		LogLevel:   mpvLogLevel(s),
 		Log:        lg,
 	})
 	pl := player.New(proc, lg)
+	pl.SetOptions(playerOptions(s))
+	pl.SetVersion(version)
+	// Our own release feed, never upstream's: this is the Go rewrite and must
+	// not report the Python shim's versions. Override with `update_url`.
+	updateURL := s.UpdateURL
+	if updateURL == "" && s.CheckUpdates {
+		updateURL = defaultUpdateURL
+	}
+	pl.SetUpdateURL(updateURL)
+	pl.SetUpdateEnabled(s.CheckUpdates)
+	pl.SetUpdateNotify(s.NotifyUpdates)
+	pl.SetSaveFunc(func(o player.Options) {
+		// The OSD preference menus change settings at runtime: copy the new
+		// options into the config and persist, under one lock so a concurrent
+		// change cannot interleave. (Called with the player's lock held, so it
+		// must not call back into the player.)
+		if err := applyAndSave(s, o, cfgPath); err != nil {
+			lg.Printf("saving config: %v", err)
+		}
+	})
 	if s.IdleStop {
 		pl.SetIdleStop(time.Duration(s.IdleDelayS) * time.Second)
 	}
 	pl.PauseReport = s.PauseReport
-	pl.ScreenshotDir = filepath.Join(configDir, "screenshots")
-
-	mcfg := jfin.MediaConfig{
-		LocalKbps: s.LocalKbps, RemoteKbps: s.RemoteKbps,
-		TranscodeH265: s.TranscodeH265, ForceH264: s.ForceH264,
-		SkipIntro: s.SkipIntro, SkipCredits: s.SkipCredits,
+	pl.ScreenshotDir = s.ScreenshotDir
+	if pl.ScreenshotDir == "" {
+		pl.ScreenshotDir = filepath.Join(configDir, "screenshots")
 	}
 
 	ws := jfin.NewWS(client, lg)
+	if s.HealthCheckS > 0 {
+		ws.HealthInterval = time.Duration(s.HealthCheckS) * time.Second
+	}
+	ws.RetryMins = s.ConnectRetryMins
+	// Built per play: the OSD preference menus can change the transcode
+	// quality / codec knobs / language rules while we run.
+	// Built per play (see below): a closure so preference changes apply now.
+	liveMediaConfig := func() jfin.MediaConfig { return mediaConfig(s) }
 	ws.On("Play", func(ctx context.Context, data json.RawMessage) {
-		go handlePlay(ctx, client, pl, mcfg, data) // don't block the WS read loop
+		go handlePlay(ctx, client, pl, liveMediaConfig(), data) // don't block the WS read loop
 	})
 	// v12's remote-control API (POST /Sessions/{id}/Command) delivers play
 	// commands as GeneralCommand {Name, Arguments}; the web UI cast path uses
@@ -304,7 +449,7 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 			return
 		}
 		b, _ := json.Marshal(pr)
-		go handlePlay(ctx, client, pl, mcfg, b)
+		go handlePlay(ctx, client, pl, liveMediaConfig(), b)
 	})
 	ws.On("Playstate", func(ctx context.Context, data json.RawMessage) {
 		go handlePlaystate(pl, data)
@@ -313,27 +458,60 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	return &session{account: a, client: client, proc: proc, pl: pl, ws: ws, logs: logs, ipcDir: ipcDir, lg: lg}, nil
 }
 
-// run keeps the /socket connection alive until ctx is canceled, then tears
-// playback down and kills mpv (upstream mpv_shim.py shutdown order).
-func (sess *session) run(ctx context.Context) {
-	ctx, sess.cancel = context.WithCancel(ctx)
-	defer sess.cancel()
-	sess.pl.Start(ctx)
-	defer sess.pl.Shutdown()
-	defer os.RemoveAll(sess.ipcDir)
-	sess.lg.Printf("mpv-shim %s — server %s, user %s, device %s", version, sess.account.Server, sess.account.Username, sess.account.DeviceID)
-	sess.lg.Printf("session loop running, Ctrl-C to quit")
-	if err := sess.ws.Run(ctx); err != nil && ctx.Err() == nil {
-		sess.lg.Printf("session loop ended: %v", err)
+// start launches the /socket loop in the background. It can be stopped with
+// disconnect() and started again with start() — the tray's Reconnect does
+// exactly that, and the player/mpv keep running in between.
+func (sess *session) start(ctx context.Context) {
+	sess.mu.Lock()
+	if sess.cancel != nil {
+		sess.cancel() // replace an earlier loop
 	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	sess.cancel = cancel
+	sess.mu.Unlock()
+
+	sess.lg.Printf("connecting to %s", sess.account.Server)
+	go func() {
+		if err := sess.ws.Run(loopCtx); err != nil && loopCtx.Err() == nil {
+			sess.lg.Printf("session loop ended: %v", err)
+		}
+		if loopCtx.Err() != nil {
+			sess.lg.Printf("disconnected")
+		}
+	}()
+}
+
+// disconnect stops the /socket loop but leaves playback, mpv and the UI alone.
+func (sess *session) disconnect() {
+	sess.mu.Lock()
+	cancel := sess.cancel
+	sess.cancel = nil
+	sess.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// connected reports whether the socket is up right now.
+func (sess *session) connected() bool { return sess.ws.Connected() }
+
+// shutdown is the app-exit path: stop the socket loop, tear playback down and
+// kill mpv (upstream mpv_shim.py shutdown order).
+func (sess *session) shutdown(ctx context.Context) {
+	sess.disconnect()
+	sess.pl.Shutdown()
+	_ = os.RemoveAll(sess.ipcDir)
 	sess.lg.Printf("bye")
 }
 
 // runSession is the whole app for one account: the session loop plus, when
 // there is a terminal, the TUI status screen and the desktop tray.
-func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfgDir string, interactive bool) int {
+func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfgDir, cfgPath string, interactive bool) int {
 	ring := ui.NewLogRing(200)
 	var out io.Writer = io.MultiWriter(ring, os.Stderr)
+	if s.SanitizeOutput {
+		out = &redactWriter{w: out} // upstream sanitize_output
+	}
 	if s.WriteLog {
 		if f, err := openLogFile(cfgDir); err != nil {
 			log.Printf("log file: %v", err)
@@ -343,7 +521,7 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 		}
 	}
 	lg := log.New(out, "", log.Flags())
-	sess, err := newSession(s, a, lg, ring, cfgDir)
+	sess, err := newSession(s, a, lg, ring, cfgDir, cfgPath)
 	if err != nil {
 		lg.Printf("%v", err)
 		return 1
@@ -351,7 +529,9 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go sess.run(sigCtx)
+	sess.pl.Start(sigCtx) // the player outlives a disconnect
+	sess.start(sigCtx)
+	defer sess.shutdown(sigCtx)
 
 	if !interactive {
 		<-sigCtx.Done() // headless: logs only (daemon mode)
@@ -371,11 +551,28 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 			lg.Printf("tray: open OSD menu: %v", err)
 		}
 	}
-	uiSess.Quit = func() { quitOnce.Do(func() { stop() }) }
-	uiSess.SetLogf(lg.Printf)
-	if ok := ui.RunTray(uiSess); !ok {
-		lg.Printf("tray: no system tray host found (GNOME needs the AppIndicator extension); the TUI is the full surface")
+	uiSess.UpdateNote = func() string {
+		if s.NotifyUpdates && sess.pl.HasUpdate() {
+			return "mpv-shim " + sess.pl.UpdateVersion() + " is available"
+		}
+		return ""
 	}
+	uiSess.OpenUpdatePage = sess.pl.OpenUpdatePage
+	// Quit = the whole app (session + mpv + TUI); Disconnect = session only.
+	uiSess.Quit = func() {
+		quitOnce.Do(func() {
+			stop()
+			if uiSess.QuitUI != nil {
+				uiSess.QuitUI()
+			}
+		})
+	}
+	// Disconnect drops the socket but keeps the player and the UI; the tray
+	// item then offers Reconnect, which starts the loop again.
+	uiSess.Connected = sess.connected
+	uiSess.Disconnect = sess.disconnect
+	uiSess.Reconnect = func() { sess.start(sigCtx) }
+	uiSess.SetLogf(lg.Printf)
 	deps := ui.Deps{
 		Creds:    creds,
 		CredPath: credPath,
@@ -383,8 +580,14 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 			return jfin.New(server, s.PlayerName, s.ClientUUID, version, s.IgnoreSSL)
 		},
 	}
-	_ = ui.RunStatus(uiSess, deps)
-	stop()
+	// The tray starts from inside RunStatus, after the TUI program exists: a
+	// Quit click can then always reach both the session and the TUI.
+	_ = ui.RunStatus(uiSess, deps, func() {
+		if ok := ui.RunTray(uiSess); !ok {
+			lg.Printf("tray: no system tray host found (GNOME needs the AppIndicator extension); the TUI is the full surface")
+		}
+	})
+	stop() // the TUI exited (q / tray Quit)
 	return 0
 }
 
@@ -604,15 +807,48 @@ func mpvLogLevel(s *Settings) string {
 	}
 }
 
+// redactWriter masks credentials in the log stream (upstream
+// log_utils.sanitize_output). Our own requests never put tokens in URLs, but
+// server errors and header dumps can.
+type redactWriter struct{ w io.Writer }
+
+var redactions = []struct {
+	re   *regexp.Regexp
+	with string
+}{
+	{regexp.MustCompile(`(?i)(api_key=)[^&\s"]+`), "${1}REDACTED"},
+	{regexp.MustCompile(`(?i)(Token=")[^"]+`), "${1}REDACTED"},
+	{regexp.MustCompile(`(?i)(Authorization:\s*MediaBrowser[^"]*Token=")[^"]+`), "${1}REDACTED"},
+	{regexp.MustCompile(`(?i)("X-Emby-Token":\s*")[^"]+`), "${1}REDACTED"},
+}
+
+func (r *redactWriter) Write(p []byte) (int, error) {
+	line := string(p)
+	for _, re := range redactions {
+		line = re.re.ReplaceAllString(line, re.with)
+	}
+	if _, err := io.WriteString(r.w, line); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
 // openLogFile appends to <config dir>/mpv-shim.log (the write_log setting).
 func openLogFile(cfgDir string) (*os.File, error) {
 	return os.OpenFile(filepath.Join(cfgDir, "mpv-shim.log"),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 }
 
-// isTTY reports whether stdout is a terminal (so the TUI can take it over).
+// isTTY reports whether we can run the TUI: it needs *both* ends of the
+// terminal. Checking only stdout is how you end up with a TUI that renders but
+// never receives a keystroke (stdin redirected by a launcher, a service
+// manager, `nohup`, or a shell pipeline).
 func isTTY() bool {
-	fi, err := os.Stdout.Stat()
+	return isTerminal(os.Stdin) && isTerminal(os.Stdout)
+}
+
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 

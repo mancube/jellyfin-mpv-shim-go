@@ -59,15 +59,40 @@ func RunTray(s *Session) bool {
 		}
 
 		systray.AddSeparator()
-		quit := systray.AddMenuItem("Quit", "Stop mpv-shim")
+		if s.UpdateNote != nil {
+			if note := s.UpdateNote(); note != "" {
+				update := systray.AddMenuItem(note, "Open the release page")
+				update.Click(s.OpenUpdatePage)
+				systray.AddSeparator()
+			}
+		}
+
+		connection := systray.AddMenuItem("Disconnect", "Drop the connection, keep playing")
+		connection.Click(func() {
+			// One item, two actions: the label follows the state.
+			if s.Connected != nil && s.Connected() {
+				if s.Disconnect != nil {
+					s.Disconnect()
+				}
+				return
+			}
+			if s.Reconnect != nil {
+				s.Reconnect()
+			}
+		})
+		quit := systray.AddMenuItem("Quit", "Stop mpv-shim and close the window")
 		quit.Click(func() {
+			// The whole app: session, mpv and the TUI.
 			if s.Quit != nil {
 				s.Quit()
+			}
+			if s.QuitUI != nil {
+				s.QuitUI()
 			}
 		})
 
 		close(ready)
-		go refreshTray(s, status, nowPlaying)
+		go refreshTray(s, status, nowPlaying, connection)
 	}, func() {})
 
 	select {
@@ -90,7 +115,7 @@ func connLabel(state int32) string {
 	}
 }
 
-func refreshTray(s *Session, status, nowPlaying *systray.MenuItem) {
+func refreshTray(s *Session, status, nowPlaying, connection *systray.MenuItem) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	lastState := int32(-1) // force the first swap
@@ -100,7 +125,23 @@ func refreshTray(s *Session, status, nowPlaying *systray.MenuItem) {
 			lastState = state
 			setTrayIcon(state)
 		}
+		// The connection item mirrors the state: Disconnect while online,
+		// Reconnect while offline.
+		online := state == jfin.StateConnected
+		if online {
+			connection.SetTitle("Disconnect")
+			connection.SetTooltip("Drop the connection, keep playing")
+		} else {
+			connection.SetTitle("Reconnect")
+			connection.SetTooltip("Connect to " + s.Account.Server + " again")
+		}
+
 		text := "mpv-shim — " + connLabel(state)
+		if s.UpdateNote != nil {
+			if note := s.UpdateNote(); note != "" {
+				text = note
+			}
+		}
 		status.SetTitle("Status: " + text)
 		systray.SetTooltip(text)
 

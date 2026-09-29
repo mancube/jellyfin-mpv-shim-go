@@ -10,7 +10,6 @@ type User struct {
 type LoginResponse struct {
 	AccessToken string `json:"AccessToken"`
 	User        User   `json:"User"`
-	ServerName  string `json:"ServerName"`
 }
 
 // Item is the subset of the item DTO used by the media pipeline. All fields
@@ -24,6 +23,13 @@ type Item struct {
 	SeriesName        string `json:"SeriesName"`
 	ProductionYear    *int   `json:"ProductionYear"`
 	RunTimeTicks      *int64 `json:"RunTimeTicks"`
+	// Chapters come with the item when requested (upstream get_chapters keeps
+	// only the ones that have an image, so the seek preview has something).
+	Chapters []struct {
+		Name               string `json:"Name"`
+		StartPositionTicks int64  `json:"StartPositionTicks"`
+		ImageTag           string `json:"ImageTag"`
+	} `json:"Chapters,omitempty"`
 }
 
 // MediaStream is one audio/subtitle stream of a MediaSource.
@@ -55,6 +61,9 @@ type MediaSource struct {
 	LiveStreamId               string        `json:"LiveStreamId"`
 	DefaultAudioStreamIndex    *int          `json:"DefaultAudioStreamIndex"`
 	DefaultSubtitleStreamIndex *int          `json:"DefaultSubtitleStreamIndex"`
+	// CustomPrefs carries the server's per-client preferences for this source
+	// (e.g. SkipBackLength/SkipForwardLength when use_web_seek is on).
+	CustomPrefs map[string]any `json:"CustomPrefs,omitempty"`
 }
 
 // PlaybackInfo is the POST /Items/{id}/PlaybackInfo response.
@@ -62,6 +71,13 @@ type PlaybackInfo struct {
 	MediaSources  []MediaSource `json:"MediaSources"`
 	PlaySessionId string        `json:"PlaySessionId"`
 	LiveStreamId  string        `json:"LiveStreamId"`
+}
+
+// Chapter is one chapter marker (upstream media.get_chapters).
+type Chapter struct {
+	Name       string
+	StartTicks int64
+	ImageTag   string
 }
 
 // PlaylistItem is one entry of the NowPlayingQueue.

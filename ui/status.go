@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -24,8 +25,20 @@ type Session struct {
 	LogPath   string
 	// OpenOSD opens the in-player OSD menu (the tray's "Player Menu" item).
 	OpenOSD func()
-	// Quit stops the whole app (the tray uses it too).
+	// UpdateNote is a one-line notice (e.g. a new release is available).
+	UpdateNote func() string
+	// OpenUpdatePage opens that release in the browser.
+	OpenUpdatePage func()
+	// Quit stops the whole app: the session, mpv and the TUI.
 	Quit func()
+	// Disconnect drops the connection but keeps playback and the UI up;
+	// Reconnect starts the socket loop again. The tray item toggles between
+	// the two based on Connected.
+	Disconnect func()
+	Reconnect  func()
+	Connected  func() bool
+	// QuitUI asks the TUI program to exit; installed by RunStatus.
+	QuitUI func()
 
 	accounts chan struct{} // tray → TUI: open the account wizard
 	logf     func(string, ...any)
@@ -64,6 +77,7 @@ type statusModel struct {
 	deps    Deps
 	setup   *setupModel
 	inSetup bool
+	notice  string // transient one-line feedback ("already connected")
 }
 
 func newStatusModel(s *Session, d Deps) statusModel {
@@ -85,59 +99,121 @@ func waitAccounts(s *Session) tea.Cmd {
 
 func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case backMsg:
+		return m.closeSetup()
 	case tea.KeyMsg:
+		// While the account wizard is open it owns the keyboard, except for
+		// the two keys that belong to the host: esc = back, ctrl+c = quit.
+		if m.inSetup {
+			switch msg.String() {
+			case "ctrl+c":
+				if m.s.Quit != nil {
+					m.s.Quit()
+				}
+				return m, tea.Quit
+			case "esc":
+				return m.closeSetup()
+			}
+			if m.setup != nil {
+				next, cmd := m.setup.Update(msg)
+				if sm, ok := next.(setupModel); ok {
+					m.setup = &sm
+				}
+				return m, cmd
+			}
+			return m.closeSetup()
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			if m.s.Quit != nil {
 				m.s.Quit()
 			}
-			return m, tea.Quit
-		case "a", "r", "i", "p":
+			return m, tea.Quit // the TUI leaves; main then stops the session
+		case "r":
+			// r is always "reconnect" — never an alias for something else.
+			if m.online() {
+				m.notice = "already connected"
+				return m, nil
+			}
+			if m.s.Reconnect != nil {
+				m.s.Reconnect()
+				m.notice = "reconnecting…"
+			}
+			return m, nil
+		case "a":
 			return m.openSetup()
 		}
 	case accountsMsg:
 		return m.openSetup()
 	case tickMsg:
+		m.notice = ""
 		return m, tick()
 	}
 	return m, nil
 }
 
 // openSetup switches to the account wizard (keys or tray) and keeps watching
-// for further tray clicks.
+// for further tray clicks. The wizard is embedded: its "q"/"esc" come back here
+// instead of quitting the app.
 func (m statusModel) openSetup() (tea.Model, tea.Cmd) {
 	if m.setup == nil {
 		sm := newSetupModel(m.deps)
 		m.setup = &sm
 	}
+	m.setup.embedded = true
+	m.setup.onBack = func() tea.Cmd { return func() tea.Msg { return backMsg{} } }
 	m.inSetup = true
 	return m, tea.Batch(m.setup.Init(), waitAccounts(m.s))
+}
+
+// closeSetup returns from the wizard to the status screen.
+func (m statusModel) closeSetup() (tea.Model, tea.Cmd) {
+	m.inSetup = false
+	m.setup = nil
+	return m, nil
 }
 
 func (m statusModel) View() string {
 	if m.inSetup {
 		return m.setup.View()
 	}
-	return strings.Join([]string{
-		m.headerView(),
-		m.nowPlayingView(),
-		m.logView(),
-		"",
-		hints([2]string{"a", "accounts"}, [2]string{"p", "add account"}, [2]string{"q", "quit"}),
-		"",
-	}, "\n")
+	views := []string{m.headerView(), m.connectionView(), m.nowPlayingView()}
+	if m.s.UpdateNote != nil {
+		if note := m.s.UpdateNote(); note != "" {
+			views = append(views, styWarn.Render("▲ "+note))
+		}
+	}
+	views = append(views, m.logView(), "",
+		hints([2]string{"a", "accounts"}, [2]string{"r", "reconnect"},
+			[2]string{"q", "quit"}), "")
+	return strings.Join(views, "\n")
+}
+
+// online reports whether the socket is up right now.
+func (m statusModel) online() bool {
+	return m.s.WS != nil && m.s.WS.State() == jfin.StateConnected
+}
+
+// connectionView is the single place that explains the connection state, so the
+// header dot and this line can never disagree.
+func (m statusModel) connectionView() string {
+	var text string
+	switch {
+	case m.online():
+		text = styOK.Render("● connected") + styDim.Render("  — ready to cast")
+	case m.s.WS != nil && m.s.WS.State() == jfin.StateReconnecting:
+		text = styWarn.Render("● reconnecting") + styDim.Render("  — retrying, r to retry now")
+	default:
+		text = styBad.Render("● offline") + styDim.Render("  — r to reconnect, check the server")
+	}
+	if m.notice != "" {
+		text += styDim.Render("   (" + m.notice + ")")
+	}
+	return text
 }
 
 func (m statusModel) headerView() string {
-	conn := styBad.Render("● offline")
-	switch m.s.WS.State() {
-	case jfin.StateConnected:
-		conn = styOK.Render("● online")
-	case jfin.StateReconnecting:
-		conn = styWarn.Render("● reconnecting")
-	}
-	line := conn + styDim.Render("   "+clip(m.s.Account.Server, 44)) +
-		styDim.Render("  ·  ") + clip(m.s.Account.Username, 20)
+	line := clip(m.s.Account.Server, 44) + styDim.Render("  ·  ") + clip(m.s.Account.Username, 20)
 	right := styDim.Render(clip(m.s.Account.DeviceID, 8))
 	gap := 58 - lipgloss.Width(line) - lipgloss.Width(right)
 	if gap < 1 {
@@ -210,12 +286,30 @@ func fmtTime(sec float64) string {
 
 // RunSetup runs the account wizard and returns when the user quits it.
 func RunSetup(d Deps) error {
-	_, err := tea.NewProgram(newSetupModel(d), tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(newSetupModel(d),
+		tea.WithAltScreen(),
+		tea.WithInput(os.Stdin), // never fall back to opening /dev/tty
+		tea.WithOutput(os.Stdout),
+	).Run()
 	return err
 }
 
-// RunStatus runs the live status screen (blocking).
-func RunStatus(s *Session, d Deps) error {
-	_, err := tea.NewProgram(newStatusModel(s, d), tea.WithAltScreen()).Run()
+// RunStatus runs the live status screen (blocking). onStart is called once the
+// program exists, so callers can wire up the tray there: a tray Quit can then
+// always reach QuitUI, even if it is clicked immediately.
+func RunStatus(s *Session, d Deps, onStart func()) error {
+	prog := tea.NewProgram(newStatusModel(s, d),
+		tea.WithAltScreen(),
+		tea.WithInput(os.Stdin),   // never fall back to opening /dev/tty: with a
+		tea.WithOutput(os.Stdout), // redirected stdin that silently eats keys
+	)
+	// prog.Quit() must never run on the program's own goroutine: bubbletea
+	// hands messages over an unbuffered channel, so sending from inside Update
+	// deadlocks the loop. That is why "q" used to only disconnect.
+	s.QuitUI = func() { go prog.Quit() }
+	if onStart != nil {
+		onStart()
+	}
+	_, err := prog.Run()
 	return err
 }
