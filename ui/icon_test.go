@@ -46,7 +46,7 @@ func TestTrayIconIsHighResolution(t *testing.T) {
 // The artwork is the project's own icon, untouched; only the status dot is
 // drawn on top, and it is big enough to see after the panel downscales it.
 func TestTrayIconArtworkPlusStatusDot(t *testing.T) {
-	base := baseIcon(0)
+	base := baseIcon()
 	if base == nil {
 		t.Fatal("no embedded artwork")
 	}
@@ -116,31 +116,6 @@ func TestPNGToICO(t *testing.T) {
 	}
 	if _, err := png.Decode(bytes.NewReader(ico[22:])); err != nil {
 		t.Errorf("ICO payload is not a PNG: %v", err)
-	}
-}
-
-// Smaller source sizes must be supported (some panels/theme prefer them) and
-// stay square and non-empty.
-func TestTrayIconSizes(t *testing.T) {
-	for _, size := range []int{0, 32, 64, 128} {
-		img := decodeIcon(t, jfin.StateConnected)
-		if size != 0 {
-			b := trayIconSize(jfin.StateConnected, size)
-			if len(b) == 0 {
-				t.Fatalf("trayIconSize(%d) returned nothing", size)
-			}
-			small, err := png.Decode(bytes.NewReader(b))
-			if err != nil {
-				t.Fatalf("decode size %d: %v", size, err)
-			}
-			if small.Bounds().Dx() != size {
-				t.Errorf("trayIconSize(%d) produced %v", size, small.Bounds())
-			}
-			img = small
-		}
-		if img.Bounds().Dx() < 32 {
-			t.Errorf("size %d: icon too small: %v", size, img.Bounds())
-		}
 	}
 }
 

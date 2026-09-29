@@ -847,7 +847,7 @@ func (p *Player) introCheckLocked() {
 			}
 			p.mpv.ShowText(msg, 3000, 1)
 			p.lastPos = in.End
-			p.sendProgressLocked()
+			p.reportLocked()
 			return
 		}
 		// "Ask to skip": only prompt near the end of the segment.

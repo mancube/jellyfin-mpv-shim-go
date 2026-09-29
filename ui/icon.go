@@ -12,7 +12,6 @@ import (
 	"bytes"
 	_ "embed"
 	"encoding/binary"
-	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
@@ -27,9 +26,6 @@ import (
 //go:embed assets/jellyfin-256.png
 var icon256 []byte
 
-//go:embed assets/jellyfin-128.png
-var icon128 []byte
-
 // Status dot colours, one per connection state.
 var (
 	dotConnected    = color.NRGBA{R: 0x2e, G: 0xd4, B: 0x5a, A: 0xff} // green
@@ -41,18 +37,12 @@ var (
 var (
 	baseOnce sync.Once
 	baseImg  image.Image
-	baseSize int // 0 = the largest embedded artwork
 )
 
 // trayIcon renders the tray icon for a connection state: PNG on Linux/macOS,
 // a generated single-entry ICO on Windows.
 func trayIcon(state int32) []byte {
-	return trayIconSize(state, 0)
-}
-
-// trayIconSize is trayIcon with a chosen source resolution (0 = largest).
-func trayIconSize(state int32, size int) []byte {
-	base := baseIcon(size)
+	base := baseIcon()
 	if base == nil {
 		return nil
 	}
@@ -69,84 +59,14 @@ func trayIconSize(state int32, size int) []byte {
 	return buf.Bytes()
 }
 
-// baseIcon decodes the embedded artwork once. trayIconSize picks the source
-// resolution: 0 = the largest available.
-func baseIcon(size int) image.Image {
+// baseIcon decodes the embedded 256 px artwork once.
+func baseIcon() image.Image {
 	baseOnce.Do(func() {
-		for _, b := range [][]byte{icon256, icon128} {
-			if img, err := png.Decode(bytes.NewReader(b)); err == nil {
-				baseImg, baseSize = img, img.Bounds().Dx()
-				break
-			}
+		if img, err := png.Decode(bytes.NewReader(icon256)); err == nil {
+			baseImg = img
 		}
 	})
-	if baseImg == nil {
-		return nil
-	}
-	if size == 0 || size >= baseSize {
-		return baseImg
-	}
-	// Downscale once; cached per requested size.
-	key := fmt.Sprintf("icon:%d", size)
-	scalesOnce.Do(func() { scales = map[string]image.Image{} })
-	if img, ok := scales[key]; ok {
-		return img
-	}
-	small := image.NewNRGBA(image.Rect(0, 0, size, size))
-	// Box-average downscale: for icon work it beats bilinear on hard edges and
-	// needs no extra dependency (golang.org/x/image is not in the graph).
-	averageScale(small, baseImg)
-	scales[key] = small
-	return small
-}
-
-var (
-	scalesOnce sync.Once
-	scales     map[string]image.Image
-)
-
-// averageScale is a plain box filter over the source pixels.
-func averageScale(dst *image.NRGBA, src image.Image) {
-	sw, sh := src.Bounds().Dx(), src.Bounds().Dy()
-	dw, dh := dst.Bounds().Dx(), dst.Bounds().Dy()
-	for y := 0; y < dh; y++ {
-		y0, y1 := y*sh/dh, (y+1)*sh/dh
-		if y1 <= y0 {
-			y1 = y0 + 1
-		}
-		for x := 0; x < dw; x++ {
-			x0, x1 := x*sw/dw, (x+1)*sw/dw
-			if x1 <= x0 {
-				x1 = x0 + 1
-			}
-			var r, g, b, a, n uint64
-			for sy := y0; sy < y1; sy++ {
-				for sx := x0; sx < x1; sx++ {
-					cr, cg, cb, ca := src.At(sx, sy).RGBA()
-					// premultiplied average, then un-premultiply
-					r += uint64(cr) * uint64(ca) / 0xffff
-					g += uint64(cg) * uint64(ca) / 0xffff
-					b += uint64(cb) * uint64(ca) / 0xffff
-					a += uint64(ca)
-					n++
-				}
-			}
-			if n == 0 {
-				n = 1
-			}
-			avgA := a / n
-			if avgA == 0 {
-				dst.SetNRGBA(x, y, color.NRGBA{})
-				continue
-			}
-			dst.SetNRGBA(x, y, color.NRGBA{
-				R: uint8((r / n) * 0xffff / avgA),
-				G: uint8((g / n) * 0xffff / avgA),
-				B: uint8((b / n) * 0xffff / avgA),
-				A: uint8(avgA >> 8),
-			})
-		}
-	}
+	return baseImg
 }
 
 // drawStatusDot puts a filled circle with a dark outline in the bottom-right

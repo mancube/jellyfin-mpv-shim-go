@@ -270,10 +270,8 @@ Design notes worth knowing:
   so mpv gets the `Authorization` header via `--http-header-fields` and the
   token never appears in a URL or in `ps`.
 
-More detail lives in [PLAN.md](PLAN.md) (scope and milestones) and
-[RESEARCH.md](RESEARCH.md) (protocol/wire notes). [progress.md](progress.md) is
-the development log: what was verified against a live server, and what is still
-worth a manual pass.
+More detail lives in [docs/PLAN.md](docs/PLAN.md) (scope and milestones) and
+[docs/RESEARCH.md](docs/RESEARCH.md) (protocol/wire notes).
 
 ## Development
 

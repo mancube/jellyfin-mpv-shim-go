@@ -165,7 +165,7 @@ func (p *Player) seekExact(delta float64) {
 	if err := p.mpv.Command("seek", delta, "relative+exact"); err != nil {
 		p.log.Printf("exact seek %+v: %v", delta, err)
 	}
-	p.sendProgressLocked()
+	p.reportLocked()
 }
 
 // seekRelative seeks by delta seconds (mpv keybindings: arrows, jump keys).
@@ -188,7 +188,7 @@ func (p *Player) seekRelative(delta float64) {
 			p.lastPos = f
 		}
 	}
-	p.sendProgressLocked()
+	p.reportLocked()
 }
 
 func (p *Player) isPausedLocked() bool {
@@ -212,7 +212,7 @@ func (p *Player) SetPaused(paused bool) {
 	p.lastPause = paused
 	p.touchLocked()
 	if p.PauseReport {
-		p.sendProgressLocked()
+		p.reportLocked()
 	}
 }
 
@@ -252,7 +252,7 @@ func (p *Player) seekLocked(pos float64, absolute bool) {
 			}
 		}
 	}
-	p.sendProgressLocked()
+	p.reportLocked()
 }
 
 // SetVolume sets the volume 0-100 (clamped). Upstream only writes when the
@@ -284,14 +284,14 @@ func (p *Player) SetVolume(pct int) {
 		if f, ok := x.(float64); ok && int(f) == pct {
 			if changed { // we only unmuted
 				p.touchLocked()
-				p.sendProgressLocked()
+				p.reportLocked()
 			}
 			return // unchanged: no report (the server spams SetVolume)
 		}
 	}
 	p.mpv.SetProperty("volume", pct)
 	p.touchLocked()
-	p.sendProgressLocked()
+	p.reportLocked()
 }
 
 // GetVolume returns the current volume (percent).
@@ -313,7 +313,7 @@ func (p *Player) SetMute(mute bool) {
 	p.mpv.SetProperty("mute", mute)
 	p.lastMute = mute
 	p.touchLocked()
-	p.sendProgressLocked()
+	p.reportLocked()
 }
 
 // ToggleFullscreen flips the mpv fullscreen property.
@@ -511,7 +511,3 @@ func (p *Player) UnwatchedQuit() {
 		}
 	}
 }
-
-// sendProgressLocked posts a progress report after a remote/UI change
-// (upstream timeline_handle + send_timeline). No-op without media.
-func (p *Player) sendProgressLocked() { p.reportLocked() }

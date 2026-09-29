@@ -10,7 +10,6 @@ type User struct {
 type LoginResponse struct {
 	AccessToken string `json:"AccessToken"`
 	User        User   `json:"User"`
-	ServerName  string `json:"ServerName"`
 }
 
 // Item is the subset of the item DTO used by the media pipeline. All fields

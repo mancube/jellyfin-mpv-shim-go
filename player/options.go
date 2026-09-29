@@ -178,20 +178,11 @@ func (p *Player) RemoteKbps() int {
 }
 
 // ApplySubtitleStyle pushes the subtitle size/colour/position to mpv. Port of
-// upstream player.update_subtitle_visuals.
+// upstream player.update_subtitle_visuals. Caller must not hold p.mu.
 func (p *Player) ApplySubtitleStyle() {
 	p.mu.Lock()
-	o := p.opt
-	p.mu.Unlock()
-	if o.SubSize > 0 {
-		p.mpv.SetProperty("sub-scale", fmt.Sprintf("%.2f", float64(o.SubSize)/100))
-	}
-	if o.SubColor != "" {
-		p.mpv.SetProperty("sub-color", o.SubColor)
-	}
-	if pos := subPos(o.SubPosition); pos != "" {
-		p.mpv.SetProperty("sub-pos", pos)
-	}
+	defer p.mu.Unlock()
+	p.applySubtitleStyleLocked()
 }
 
 // webSeekLengths returns the remote's skip lengths in seconds (negative for
