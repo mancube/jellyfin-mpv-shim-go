@@ -1332,33 +1332,79 @@ func TestPrefsMenusChangeSettings(t *testing.T) {
 	h := setup(t)
 	playOne(t, h, cfg())
 	var saved int
-	h.pl.SetSaveFunc(func() { saved++ })
+	// The real callback shape: read the options it is handed and write them
+	// back. It must not call back into the player — that deadlocked the whole
+	// app when a preference was changed from the menu.
+	h.pl.SetSaveFunc(func(o Options) {
+		saved++
+		if o.TranscodeHDR {
+			saved += 100
+		}
+	})
 
+	// Drive the whole flow (open → Video Preferences → toggle → back out) from
+	// a goroutine: a deadlock here is the bug this test is about.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.pl.Key("menu")
+		moveTo(h.pl, h.fm, videoPrefsTitle)
+		h.pl.Key("ok")
+		moveTo(h.pl, h.fm, "Transcode HDR")
+		h.pl.Key("ok")
+		h.pl.Key("back")
+		h.pl.Key("back")
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("changing a preference deadlocked (the app froze)")
+	}
+
+	if !h.pl.Options().TranscodeHDR {
+		t.Error("Transcode HDR toggle did not take")
+	}
+	if saved != 101 {
+		t.Errorf("preference change not persisted with the new value (save called %d)", saved)
+	}
+}
+
+// The root menu carries both preference menus, and re-rendering a preference
+// menu shows the new state.
+func TestPrefsMenuRerenders(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetSaveFunc(func(Options) {})
 	h.pl.Key("menu")
-	// Video Preferences is a row in the root menu.
 	root := h.fm.lastText()
-	if !strings.Contains(root, "Video Preferences") || !strings.Contains(root, "Player Preferences") {
+	if !strings.Contains(root, videoPrefsTitle) || !strings.Contains(root, playerPrefsTitle) {
 		t.Fatalf("prefs rows missing from the root menu:\n%s", root)
 	}
-	moveTo(h.pl, h.fm, "Video Preferences")
+	moveTo(h.pl, h.fm, videoPrefsTitle)
 	h.pl.Key("ok")
 	prefs := h.fm.lastText()
 	if !strings.Contains(prefs, "Subtitle Size") || !strings.Contains(prefs, "Transcode HDR") {
 		t.Fatalf("video prefs = %q", prefs)
 	}
-	// Toggle "Transcode HDR".
 	moveTo(h.pl, h.fm, "Transcode HDR")
 	h.pl.Key("ok")
-	if !h.pl.Options().TranscodeHDR {
-		t.Error("Transcode HDR toggle did not take")
+	if got := h.fm.lastText(); !strings.Contains(got, "✔ Transcode HDR") {
+		t.Errorf("prefs menu not re-rendered with the new state:\n%s", got)
 	}
-	if saved == 0 {
-		t.Error("preference change was not persisted")
+	// Player preferences has the behaviour toggles.
+	for i := 0; i < 2; i++ { // back to the root menu
+		h.pl.Key("back")
+		if strings.Contains(h.fm.lastText(), "Main Menu") {
+			break
+		}
 	}
-	// …and we are back in the prefs menu, with the checkmark.
-	prefs = h.fm.lastText()
-	if !strings.Contains(prefs, "✔ Transcode HDR") {
-		t.Errorf("prefs menu not re-rendered with the new state:\n%s", prefs)
+	if !strings.Contains(h.fm.lastText(), "Main Menu") {
+		t.Fatalf("did not get back to the root menu:\n%s", h.fm.lastText())
+	}
+	moveTo(h.pl, h.fm, playerPrefsTitle)
+	h.pl.Key("ok")
+	if p := h.fm.lastText(); !strings.Contains(p, "Auto Play") || !strings.Contains(p, "Enable OSC") {
+		t.Errorf("player prefs = %q", p)
 	}
 }
 
@@ -1537,5 +1583,44 @@ func TestUpdateCheckIgnoresOlderRelease(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if h.pl.HasUpdate() {
 		t.Error("an older release was announced as an update")
+	}
+}
+
+// The save callback runs while the player's lock is held, so it must receive
+// the options rather than reading them back (that was the freeze: the callback
+// re-entered Options() → self-deadlock → the whole app hung).
+func TestSaveCallbackGetsOptionsWithoutReentering(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	var got Options
+	var before time.Time
+	h.pl.SetSaveFunc(func(o Options) {
+		got = o
+		before = time.Now()
+	})
+	o := h.pl.Options()
+	o.SeekRight = 42
+	h.pl.SetOptions(o)
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, videoPrefsTitle)
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Subtitle Size")
+	h.pl.Key("ok")
+	h.pl.Key("down")
+	h.pl.Key("ok") // pick a size
+	if before.IsZero() {
+		t.Fatal("save callback never ran")
+	}
+	if got.SubSize == 0 {
+		t.Error("save callback received zero options")
+	}
+	// The values we set before opening the menu must still be there: the
+	// callback copies, it does not reset.
+	if got.SeekRight != 42 {
+		t.Errorf("save callback lost unrelated settings: seek_right = %v", got.SeekRight)
+	}
+	if got.SubSize == 0 || got.SubColor == "" {
+		t.Errorf("save callback got a half-filled Options: %+v", got)
 	}
 }

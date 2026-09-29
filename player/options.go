@@ -146,17 +146,19 @@ func (p *Player) Options() Options {
 }
 
 // SetSaveFunc installs the callback the preference menus use to persist a
-// settings change.
-func (p *Player) SetSaveFunc(f func()) {
+// settings change. It receives the new options, because it is called with
+// p.mu held: re-entering the player from here would deadlock.
+func (p *Player) SetSaveFunc(f func(Options)) {
 	p.mu.Lock()
 	p.save = f
 	p.mu.Unlock()
 }
 
-// saveNowLocked persists the settings, if a save function is installed.
+// saveNowLocked persists the settings, if a save function is installed. The
+// caller must hold p.mu; the callback must not call back into the player.
 func (p *Player) saveNowLocked() {
 	if p.save != nil {
-		p.save()
+		p.save(p.opt)
 	}
 }
 

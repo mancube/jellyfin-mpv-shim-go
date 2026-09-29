@@ -59,7 +59,7 @@ type Player struct {
 	// opt holds the runtime settings; save persists changes made by the OSD
 	// preference menus.
 	opt  Options
-	save func()
+	save func(Options)
 
 	// update check (upstream update_check.py)
 	updateURL     string

@@ -286,8 +286,7 @@ func playerOptions(s *Settings) player.Options {
 
 // applyOptionsToSettings copies the player's runtime options back into the
 // config, so a change made in the OSD preference menus survives a restart.
-func applyOptionsToSettings(s *Settings, pl *player.Player) {
-	o := pl.Options()
+func applyOptionsToSettings(s *Settings, o player.Options) {
 	s.SeekUp, s.SeekDown, s.SeekLeft, s.SeekRight = o.SeekUp, o.SeekDown, o.SeekLeft, o.SeekRight
 	s.SeekHExact, s.SeekVExact, s.UseWebSeek = o.SeekHExact, o.SeekVExact, o.UseWebSeek
 	s.MediaKeySeek = o.MediaKeySeek
@@ -336,10 +335,11 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	}
 	pl.SetUpdateURL(updateURL)
 	pl.SetUpdateEnabled(s.CheckUpdates)
-	pl.SetSaveFunc(func() {
-		// The OSD preference menus change settings at runtime: copy the
-		// player's options back into the config, then persist.
-		applyOptionsToSettings(s, pl)
+	pl.SetSaveFunc(func(o player.Options) {
+		// The OSD preference menus change settings at runtime: copy the new
+		// options into the config and persist. (Called with the player's lock
+		// held, so it must not call back into the player.)
+		applyOptionsToSettings(s, o)
 		if err := s.Save(cfgPath); err != nil {
 			lg.Printf("saving config: %v", err)
 		}
@@ -353,15 +353,17 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 		pl.ScreenshotDir = filepath.Join(configDir, "screenshots")
 	}
 
-	mcfg := mediaConfig(s)
-
 	ws := jfin.NewWS(client, lg)
 	if s.HealthCheckS > 0 {
 		ws.HealthInterval = time.Duration(s.HealthCheckS) * time.Second
 	}
 	ws.RetryMins = s.ConnectRetryMins
+	// Built per play: the OSD preference menus can change the transcode
+	// quality / codec knobs / language rules while we run.
+	// Built per play (see below): a closure so preference changes apply now.
+	liveMediaConfig := func() jfin.MediaConfig { return mediaConfig(s) }
 	ws.On("Play", func(ctx context.Context, data json.RawMessage) {
-		go handlePlay(ctx, client, pl, mcfg, data) // don't block the WS read loop
+		go handlePlay(ctx, client, pl, liveMediaConfig(), data) // don't block the WS read loop
 	})
 	// v12's remote-control API (POST /Sessions/{id}/Command) delivers play
 	// commands as GeneralCommand {Name, Arguments}; the web UI cast path uses
@@ -409,7 +411,7 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 			return
 		}
 		b, _ := json.Marshal(pr)
-		go handlePlay(ctx, client, pl, mcfg, b)
+		go handlePlay(ctx, client, pl, liveMediaConfig(), b)
 	})
 	ws.On("Playstate", func(ctx context.Context, data json.RawMessage) {
 		go handlePlaystate(pl, data)
