@@ -40,6 +40,57 @@ Deliberately **not** included: music, live TV, the in-mpv library browser,
 offline sync, SyncPlay, display mirroring, shader packs/SVP, trickplay
 thumbnails, bulk subtitles, Discord presence, i18n.
 
+## Why Go (and what the rewrite buys)
+
+Same protocol, same in-player UX, a much smaller machine footprint. Measured on
+the machine this was developed on (Arch/KDE, mpv 0.41, Jellyfin 12 on the LAN):
+
+| | mpv-shim-go | jellyfin-mpv-shim (Python) |
+|---|---|---|
+| Install | one 11 MB static binary, no runtime | Python ≥3.9 + 4 required packages, plus a GUI stack (pystray/pillow, optionally pywebview/Tk) |
+| Cold start (`-version`) | **1 ms** | interpreter start alone is ~7 ms, then the imports |
+| First network call (`-status`, one HTTPS round trip) | **~30 ms** | interpreter + imports before the call |
+| Idle while connected | **24 MiB RSS, 0.00 % of one core** | Tk/GTK tray, requests session, periodic property polling |
+| Cross-compile | linux/amd64, linux/arm64, windows/amd64, darwin/arm64 from one `go build` | per-platform packaging and a Python runtime per target |
+| Configuration | one JSON file | one JSON file |
+
+Reproduce the numbers yourself:
+
+```sh
+go build -trimpath -ldflags "-s -w" -o mpv-shim . && ls -lh mpv-shim
+time ./mpv-shim -version          # cold start
+( ./mpv-shim --headless & sleep 5; grep VmRSS /proc/$!/status; top -p $! )
+```
+
+Where the savings come from, structurally:
+
+- **One mpv connection, push instead of pull.** We own a single unix-socket IPC
+  channel with request-id correlation, and we subscribe to mpv's
+  `property-change` events (`pause`, `seeking`, `time-pos`, `aid`, `sid`, …).
+  The Python shim drives mpv through `python-mpv`'s property observers and, in
+  its external-mpv mode, a JSON-IPC client that spawns a process per call and
+  polls — every callback crossing a GIL-bound task queue (`synchronous()`
+  decorator, `evt_queue`, `action_trigger`).
+- **Goroutines instead of threads + queues.** One goroutine per concern (socket
+  reader, IPC reader, timeline ticker, process monitor). The player state lives
+  behind a single mutex, so remote commands during a seek cannot interleave —
+  and there is no task-queue hop for mpv callbacks.
+- **No GUI toolkit.** The setup/status UI is a Bubble Tea TUI and a systray
+  (both pure Go): no GTK/Qt/Tk, no webview, no `GObject` main loop, no display
+  server dependency beyond what mpv itself needs.
+- **Static linking, no venv, no pip on the target.** One file to ship; the
+  Arch package installs three files (binary, `.desktop`, icon).
+- **Failure handling is cheaper.** Reconnect backoff, health checks, mpv crash
+  respawn and transcode teardown are goroutines with deadlines, so a hung HTTP
+  call cannot stall the IPC path.
+
+Honest counterweight: this is not a superset. The Python shim still has
+SyncPlay, display mirroring, shader packs/SVP, trickplay thumbnails, bulk
+subtitles, Discord presence, i18n and a richer preference menu — dropping them
+is what keeps the Go version small. The Go source is also not smaller
+(~7.7k lines excluding tests, against upstream's ~7.4k); the win is in what the
+process needs at runtime.
+
 ## Install
 
 One static binary, plus a launcher entry. Requires an `mpv` binary on the
