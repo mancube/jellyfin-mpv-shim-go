@@ -664,16 +664,19 @@ func TestKeyFallbackSeekWhenMenuClosed(t *testing.T) {
 	h.fm.SetProperty("time-pos", 10.0)
 
 	before := h.fm.numCmds()
-	h.pl.Key("right") // menu closed → +5 s relative seek
+	h.pl.Key("left")  // menu closed → -5 s
+	h.pl.Key("right") // +5 s
 	h.pl.Key("up")    // +60 s
-	if h.fm.numCmds() != before+2 {
-		t.Fatalf("expected 2 seek commands, got %d", h.fm.numCmds()-before)
+	if h.fm.numCmds() != before+3 {
+		t.Fatalf("expected 3 seek commands, got %d", h.fm.numCmds()-before)
 	}
 	h.fm.mu.Lock()
 	got := strings.Join(h.fm.cmds[before:], "|")
 	h.fm.mu.Unlock()
-	if !strings.Contains(got, "15") || !strings.Contains(got, "85") {
-		t.Errorf("seek commands = %q, want relative seeks to 15 and 85", got)
+	// mpv's "relative" is relative to the current position, so the *amount*
+	// is what we send — never a computed absolute position.
+	if want := "seek-5relative|seek5relative|seek60relative"; got != want {
+		t.Errorf("seek commands = %q, want %q", got, want)
 	}
 }
 

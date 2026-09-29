@@ -101,16 +101,27 @@ func (p *Player) MenuAction(action string) {
 	}
 }
 
+// seekRelative seeks by delta seconds (mpv keybindings: arrows, jump keys).
+// mpv's `relative` is relative to the *current* position, so the amount itself
+// is what we pass — passing pos+delta made every seek jump forward.
 func (p *Player) seekRelative(delta float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	pos := p.lastPos
+	if p.media == nil || p.aborted() {
+		return
+	}
+	p.touchLocked()
+	if err := p.mpv.Command("seek", delta, "relative"); err != nil {
+		p.log.Printf("seek %+v: %v", delta, err)
+		return
+	}
+	// mpv applies the seek asynchronously; re-read once it settled.
 	if x, err := p.mpv.GetProperty("time-pos"); err == nil {
 		if f, ok := x.(float64); ok {
-			pos = f
+			p.lastPos = f
 		}
 	}
-	p.seekLocked(pos+delta, false)
+	p.sendProgressLocked()
 }
 
 func (p *Player) isPausedLocked() bool {
