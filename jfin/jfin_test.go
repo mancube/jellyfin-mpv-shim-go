@@ -129,3 +129,56 @@ func TestNewNormalizesBase(t *testing.T) {
 		t.Error("expected error for unreachable host")
 	}
 }
+
+func TestQuickConnectFlow(t *testing.T) {
+	var exchanges int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/QuickConnect/Enabled", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("true"))
+	})
+	mux.HandleFunc("/QuickConnect/Initiate", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(QuickConnect{Secret: "sec", Code: "ABCD"})
+	})
+	mux.HandleFunc("/QuickConnect/Exchange", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("code") != "ABCD" || r.URL.Query().Get("Secret") != "sec" {
+			t.Errorf("bad query: %v", r.URL.Query())
+		}
+		exchanges++
+		if exchanges < 3 {
+			w.WriteHeader(400) // not authorized yet
+			return
+		}
+		_ = json.NewEncoder(w).Encode(LoginResponse{
+			AccessToken: "tok", User: User{ID: "u1", Name: "bob"},
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	c := New(ts.URL, "dev", "d", "1.0", false)
+	ctx := context.Background()
+	if !c.QuickConnectEnabled(ctx) {
+		t.Fatal("QuickConnectEnabled = false")
+	}
+	qc, err := c.QuickConnectInitiate(ctx)
+	if err != nil || qc.Code != "ABCD" {
+		t.Fatalf("Initiate = %+v, %v", qc, err)
+	}
+	var got *LoginResponse
+	for i := 0; i < 3; i++ {
+		resp, ok, err := c.QuickConnectExchange(ctx, qc)
+		if err != nil {
+			t.Fatalf("Exchange: %v", err)
+		}
+		if ok {
+			got = resp
+			break
+		}
+	}
+	if got == nil || got.AccessToken != "tok" {
+		t.Fatalf("Exchange never returned credentials: %+v", got)
+	}
+	if c.Token != "tok" || c.UserID != "u1" {
+		t.Errorf("client not authenticated: token=%q user=%q", c.Token, c.UserID)
+	}
+}

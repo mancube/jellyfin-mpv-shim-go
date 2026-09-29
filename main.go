@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -14,11 +15,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"mpv-shim/jfin"
 	"mpv-shim/player"
+	"mpv-shim/ui"
 )
 
 var version = "0.1.0-dev" // overridden via -ldflags "-X main.version=..."
@@ -39,6 +42,7 @@ func run() int {
 		fmt.Fprintln(fs.Output(), "Usage:")
 		fmt.Fprintln(fs.Output(), "  mpv-shim login <server> <username> <password>   log in and store credentials")
 		fmt.Fprintln(fs.Output(), "  mpv-shim accounts [rm <index>]                  list/remove saved accounts")
+		fmt.Fprintln(fs.Output(), "  mpv-shim setup                                 TUI: add/remove accounts (password or Quick Connect)")
 		fmt.Fprintln(fs.Output(), "  mpv-shim                                       status (session loop from M2)")
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
@@ -48,6 +52,7 @@ func run() int {
 	username := fs.String("username", "", "username")
 	password := fs.String("password", "", "password")
 	debug := fs.Bool("debug", false, "verbose logging")
+	headless := fs.Bool("headless", false, "no TUI: log to stdout only (daemon mode)")
 	loginOnly := fs.Bool("login-only", false, "log in and exit")
 	statusOnly := fs.Bool("status", false, "print connection status and exit")
 	showVersion := fs.Bool("version", false, "print version and exit")
@@ -111,6 +116,8 @@ func run() int {
 		return doLogin(ctx, &s, *username, *password, creds, credPath, *configPath)
 	case "accounts":
 		return doAccounts(fs.Args(), creds, credPath)
+	case "setup":
+		return doSetup(&s, creds, credPath)
 	case "":
 		if *loginOnly {
 			return doLogin(ctx, &s, *username, *password, creds, credPath, *configPath)
@@ -120,12 +127,24 @@ func run() int {
 		}
 		a, ok := creds.ActiveAccount()
 		if !ok {
-			fmt.Fprintln(os.Stderr, "no accounts configured. Run: mpv-shim login <server> <username> <password>")
-			return 1
+			// First run: offer the wizard when there is a terminal, else point
+			// at the CLI login.
+			if !*headless && isTTY() {
+				if rc := doSetup(&s, creds, credPath); rc != 0 {
+					return rc
+				}
+				if a, ok = creds.ActiveAccount(); !ok {
+					fmt.Fprintln(os.Stderr, "no account configured; run: mpv-shim setup")
+					return 1
+				}
+			} else {
+				fmt.Fprintln(os.Stderr, "no accounts configured. Run: mpv-shim login <server> <username> <password>")
+				return 1
+			}
 		}
-		return runSession(&s, a)
+		return runSession(&s, a, creds, credPath, !*headless && isTTY())
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected login, accounts)\n", sub)
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected login, accounts, setup)\n", sub)
 		return 2
 	}
 }
@@ -183,28 +202,39 @@ func doStatus(ctx context.Context, s *Settings, creds *jfin.CredFile) int {
 	return 0
 }
 
-// runSession is the main loop: keep the /socket connection alive, dispatch
-// Play events to the player, and run mpv as a managed subprocess.
-func runSession(s *Settings, a jfin.Account) int {
+// session bundles the live objects: REST client, mpv, player and the
+// /socket connection. The TUI/tray only read from it.
+type session struct {
+	account jfin.Account
+	client  *jfin.Client
+	proc    *player.Proc
+	pl      *player.Player
+	ws      *jfin.WS
+	logs    *ui.LogRing
+	ipcDir  string
+	lg      *log.Logger
+	cancel  context.CancelFunc
+}
+
+// newSession wires the client, mpv, player and WS event handlers.
+func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing) (*session, error) {
 	client := jfin.New(a.Server, s.PlayerName, a.DeviceID, version, s.IgnoreSSL)
 	client.Token, client.UserID = a.AccessToken, a.UserID
 
 	// The mpv IPC socket needs a world-safe dir; it's removed on exit.
 	ipcDir, err := os.MkdirTemp("", "mpv-shim-*")
 	if err != nil {
-		log.Fatalf("ipc dir: %v", err)
+		return nil, fmt.Errorf("ipc dir: %w", err)
 	}
-	defer os.RemoveAll(ipcDir)
-
 	proc := player.NewProc(player.ProcOpts{
 		Path:       s.MpvPath,
 		IPCDir:     ipcDir,
 		ConfigDir:  s.MpvConfigDir,
 		AuthHeader: client.AuthHeader(),
 		MediaKeys:  s.MediaKeys,
-		Log:        log.Default(),
+		Log:        lg,
 	})
-	pl := player.New(proc, log.Default())
+	pl := player.New(proc, lg)
 
 	mcfg := jfin.MediaConfig{
 		LocalKbps: s.LocalKbps, RemoteKbps: s.RemoteKbps,
@@ -212,7 +242,7 @@ func runSession(s *Settings, a jfin.Account) int {
 		SkipIntro: s.SkipIntro, SkipCredits: s.SkipCredits,
 	}
 
-	ws := jfin.NewWS(client, log.Default())
+	ws := jfin.NewWS(client, lg)
 	ws.On("Play", func(ctx context.Context, data json.RawMessage) {
 		go handlePlay(ctx, client, pl, mcfg, data) // don't block the WS read loop
 	})
@@ -253,16 +283,62 @@ func runSession(s *Settings, a jfin.Account) int {
 		go handlePlaystate(pl, data)
 	})
 
+	return &session{account: a, client: client, proc: proc, pl: pl, ws: ws, logs: logs, ipcDir: ipcDir, lg: lg}, nil
+}
+
+// run keeps the /socket connection alive until ctx is canceled, then tears
+// playback down and kills mpv (upstream mpv_shim.py shutdown order).
+func (sess *session) run(ctx context.Context) {
+	ctx, sess.cancel = context.WithCancel(ctx)
+	defer sess.cancel()
+	sess.pl.Start(ctx)
+	defer sess.pl.Shutdown()
+	defer os.RemoveAll(sess.ipcDir)
+	sess.lg.Printf("mpv-shim %s — server %s, user %s, device %s", version, sess.account.Server, sess.account.Username, sess.account.DeviceID)
+	sess.lg.Printf("session loop running, Ctrl-C to quit")
+	if err := sess.ws.Run(ctx); err != nil && ctx.Err() == nil {
+		sess.lg.Printf("session loop ended: %v", err)
+	}
+	sess.lg.Printf("bye")
+}
+
+// runSession is the whole app for one account: the session loop plus, when
+// there is a terminal, the TUI status screen and the desktop tray.
+func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath string, interactive bool) int {
+	ring := ui.NewLogRing(200)
+	lg := log.New(io.MultiWriter(ring, os.Stderr), "", log.Flags())
+	sess, err := newSession(s, a, lg, ring)
+	if err != nil {
+		lg.Printf("%v", err)
+		return 1
+	}
+
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	pl.Start(sigCtx)
-	defer pl.Shutdown()
-	log.Printf("mpv-shim %s — server %s, user %s, device %s", version, a.Server, a.Username, a.DeviceID)
-	log.Printf("session loop running, Ctrl-C to quit")
-	if err := ws.Run(sigCtx); err != nil {
-		log.Printf("session loop ended: %v", err)
+	go sess.run(sigCtx)
+
+	if !interactive {
+		<-sigCtx.Done() // headless: logs only (daemon mode)
+		return 0
 	}
-	log.Printf("bye")
+
+	quitOnce := sync.Once{}
+	uiSess := &ui.Session{
+		Account: a, WS: sess.ws, Player: sess.pl, Logs: ring,
+		Quit: func() { quitOnce.Do(func() { stop() }) },
+	}
+	if ok := ui.RunTray(uiSess); !ok {
+		lg.Printf("tray: no system tray host found (GNOME needs the AppIndicator extension); the TUI is the full surface")
+	}
+	deps := ui.Deps{
+		Creds:    creds,
+		CredPath: credPath,
+		NewClient: func(server string) *jfin.Client {
+			return jfin.New(server, s.PlayerName, s.ClientUUID, version, s.IgnoreSSL)
+		},
+	}
+	_ = ui.RunStatus(uiSess, deps)
+	stop()
 	return 0
 }
 
@@ -393,6 +469,36 @@ func handleGeneralCommand(pl *player.Player, name string, args json.RawMessage) 
 	default:
 		log.Printf("general command: unhandled %q", name)
 	}
+}
+
+// doSetup runs the TUI account wizard.
+func doSetup(s *Settings, creds *jfin.CredFile, credPath string) int {
+	if !isTTY() {
+		fmt.Fprintln(os.Stderr, "setup needs a terminal; use: mpv-shim login <server> <username> <password>")
+		return 2
+	}
+	deps := ui.Deps{
+		Creds:    creds,
+		CredPath: credPath,
+		NewClient: func(server string) *jfin.Client {
+			return jfin.New(server, s.PlayerName, s.ClientUUID, version, s.IgnoreSSL)
+		},
+	}
+	return intErr(ui.RunSetup(deps))
+}
+
+// isTTY reports whether stdout is a terminal (so the TUI can take it over).
+func isTTY() bool {
+	fi, err := os.Stdout.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+func intErr(err error) int {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tui: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func doAccounts(args []string, creds *jfin.CredFile, credPath string) int {

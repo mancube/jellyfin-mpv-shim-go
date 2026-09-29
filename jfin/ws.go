@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -29,6 +30,7 @@ type WS struct {
 	log      *log.Logger
 	handlers map[string]WSHandler
 	seen     map[string]struct{}
+	live     atomic.Bool // true while a socket is up (for the TUI/tray)
 
 	// HealthInterval is the /Sessions poll period (0 disables).
 	HealthInterval time.Duration
@@ -50,6 +52,9 @@ func NewWS(c *Client, logger *log.Logger) *WS {
 func (w *WS) On(msgType string, h WSHandler) {
 	w.handlers[msgType] = h
 }
+
+// Connected reports whether the socket is currently up.
+func (w *WS) Connected() bool { return w.live.Load() }
 
 // Run blocks until ctx is canceled, reconnecting forever.
 func (w *WS) Run(ctx context.Context) error {
@@ -94,6 +99,8 @@ func (w *WS) connect(ctx context.Context) (ok bool, err error) {
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	w.log.Printf("ws: connected to %s", url)
+	w.live.Store(true)
+	defer w.live.Store(false)
 	if err := w.c.PostCapabilities(ctx); err != nil {
 		w.log.Printf("ws: capabilities: %v", err)
 	}

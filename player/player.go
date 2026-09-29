@@ -76,6 +76,48 @@ func (p *Player) Start(ctx context.Context) {
 	go p.bindKeysWhenAlive(ctx)
 }
 
+// Status is a snapshot for the TUI/systray. Player is busy, so Status never
+// blocks: it answers from the last known state when mpv is unreachable.
+type Status struct {
+	Title   string
+	Position float64
+	Duration float64
+	Paused  bool
+	Volume  float64
+	Mute    bool
+	Playing bool
+}
+
+// Status returns a snapshot of the current playback.
+func (p *Player) Status() Status {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	s := Status{Volume: 100}
+	if p.media == nil {
+		return s
+	}
+	s.Title = p.media.Video.ProperTitle()
+	s.Duration = p.media.Video.GetDuration()
+	s.Playing = p.mpv.Alive() && !p.aborted()
+	if x, err := p.mpv.GetProperty("time-pos"); err == nil {
+		if f, ok := x.(float64); ok {
+			s.Position = f
+		}
+	}
+	if x, err := p.mpv.GetProperty("pause"); err == nil {
+		s.Paused, _ = x.(bool)
+	}
+	if x, err := p.mpv.GetProperty("volume"); err == nil {
+		if f, ok := x.(float64); ok {
+			s.Volume = f
+		}
+	}
+	if x, err := p.mpv.GetProperty("mute"); err == nil {
+		s.Mute, _ = x.(bool)
+	}
+	return s
+}
+
 func (p *Player) HasVideo() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

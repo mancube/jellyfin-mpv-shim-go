@@ -16,10 +16,25 @@ go build -o mpv-shim .
 ## Usage
 
 ```sh
-mpv-shim login http://localhost:8096 admin mypassword   # log in, persist credentials
-mpv-shim                                               # status (reuses saved credentials)
-mpv-shim accounts                                     # list saved accounts
-mpv-shim accounts rm 0                                # remove account by index
+mpv-shim                                                 # play: TUI status + tray, WS session loop
+mpv-shim --headless                                      # no TUI/tray, logs only (daemon/systemd)
+mpv-shim setup                                           # TUI wizard: add account (password or Quick Connect)
+mpv-shim login http://localhost:8096 admin mypassword     # log in from the CLI, persist credentials
+mpv-shim accounts                                        # list saved accounts
+mpv-shim accounts rm 0                                   # remove account by index
+mpv-shim -status                                         # connection check and exit
 ```
 
-Status: M0 (skeleton + login) done. M1–M5 in [PLAN.md](PLAN.md) §6.
+In the player window: `c` opens the OSD menu (audio/subtitles), arrows seek,
+`SPACE` pauses, `f` fullscreen, `q` stops, `<`/`>` previous/next.
+
+Build without the desktop tray (e.g. macOS without Xcode CLT):
+
+```sh
+go build -tags nosystray -o mpv-shim .
+```
+
+Config lives in `<config dir>/config.json`, credentials in `cred.json`
+(`~/.config/mpv-shim/`, `%appdata%\mpv-shim\`, `~/Library/Application Support/mpv-shim/`).
+
+Status: M0–M4 done. M5 (hardening + release) in [PLAN.md](PLAN.md) §6.
