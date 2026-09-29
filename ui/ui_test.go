@@ -263,3 +263,27 @@ func TestRequestAccountsNonBlocking(t *testing.T) {
 	s.RequestAccounts()
 	s.RequestAccounts()
 }
+
+// The tray's Quit must reach *both* the session and the TUI; Disconnect only
+// the session. This is what makes "Quit" actually exit instead of leaving an
+// offline window behind.
+func TestTrayQuitStopsSessionAndUI(t *testing.T) {
+	s := NewSession(jfin.Account{}, nil, nil, NewLogRing(4))
+	var sessionStopped, uiQuit bool
+	s.Quit = func() { sessionStopped = true }
+	s.Disconnect = func() { sessionStopped = true }
+	s.QuitUI = func() { uiQuit = true }
+
+	// Disconnect: session only.
+	s.Disconnect()
+	if !sessionStopped || uiQuit {
+		t.Errorf("Disconnect: session=%v uiQuit=%v", sessionStopped, uiQuit)
+	}
+
+	// Quit: both.
+	s.Quit()
+	s.QuitUI()
+	if !sessionStopped || !uiQuit {
+		t.Errorf("Quit: session=%v uiQuit=%v", sessionStopped, uiQuit)
+	}
+}

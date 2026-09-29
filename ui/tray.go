@@ -67,10 +67,20 @@ func RunTray(s *Session) bool {
 			}
 		}
 
-		quit := systray.AddMenuItem("Quit", "Stop mpv-shim")
+		disconnect := systray.AddMenuItem("Disconnect", "Drop the connection, keep the window open")
+		disconnect.Click(func() {
+			if s.Disconnect != nil {
+				s.Disconnect()
+			}
+		})
+		quit := systray.AddMenuItem("Quit", "Stop mpv-shim and close the window")
 		quit.Click(func() {
+			// The whole app: session, mpv and the TUI.
 			if s.Quit != nil {
 				s.Quit()
+			}
+			if s.QuitUI != nil {
+				s.QuitUI()
 			}
 		})
 

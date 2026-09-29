@@ -486,11 +486,17 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 		return ""
 	}
 	uiSess.OpenUpdatePage = sess.pl.OpenUpdatePage
-	uiSess.Quit = func() { quitOnce.Do(func() { stop() }) }
-	uiSess.SetLogf(lg.Printf)
-	if ok := ui.RunTray(uiSess); !ok {
-		lg.Printf("tray: no system tray host found (GNOME needs the AppIndicator extension); the TUI is the full surface")
+	// Quit = the whole app (session + mpv + TUI); Disconnect = session only.
+	uiSess.Quit = func() {
+		quitOnce.Do(func() {
+			stop()
+			if uiSess.QuitUI != nil {
+				uiSess.QuitUI()
+			}
+		})
 	}
+	uiSess.Disconnect = func() { stop() }
+	uiSess.SetLogf(lg.Printf)
 	deps := ui.Deps{
 		Creds:    creds,
 		CredPath: credPath,
@@ -498,8 +504,14 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 			return jfin.New(server, s.PlayerName, s.ClientUUID, version, s.IgnoreSSL)
 		},
 	}
-	_ = ui.RunStatus(uiSess, deps)
-	stop()
+	// The tray starts from inside RunStatus, after the TUI program exists: a
+	// Quit click can then always reach both the session and the TUI.
+	_ = ui.RunStatus(uiSess, deps, func() {
+		if ok := ui.RunTray(uiSess); !ok {
+			lg.Printf("tray: no system tray host found (GNOME needs the AppIndicator extension); the TUI is the full surface")
+		}
+	})
+	stop() // the TUI exited (q / tray Quit): shut the session down
 	return 0
 }
 

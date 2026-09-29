@@ -131,7 +131,8 @@ immediately and are written back to `config.json`.
 
 Status and now-playing lines, **Configure Servers…** (the TUI wizard),
 **Player Menu (OSD)**, **Open Config Folder**, **Open Log File** (when
-`write_log` is on) and **Quit**. The icon is upstream's artwork with a status
+`write_log` is on), **Disconnect** (drop the connection, keep the window) and
+**Quit** (stop mpv-shim entirely: session, player and UI). The icon is upstream's artwork with a status
 dot: green connected, amber reconnecting, grey offline.
 
 ## Configuration

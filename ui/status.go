@@ -28,8 +28,12 @@ type Session struct {
 	UpdateNote func() string
 	// OpenUpdatePage opens that release in the browser.
 	OpenUpdatePage func()
-	// Quit stops the whole app (the tray uses it too).
+	// Quit stops the whole app: the session, mpv and the TUI.
 	Quit func()
+	// Disconnect stops the session only, leaving the UI up (tray).
+	Disconnect func()
+	// QuitUI asks the TUI program to exit; installed by RunStatus.
+	QuitUI func()
 
 	accounts chan struct{} // tray → TUI: open the account wizard
 	logf     func(string, ...any)
@@ -95,7 +99,7 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.s.Quit != nil {
 				m.s.Quit()
 			}
-			return m, tea.Quit
+			return m, tea.Quit // the TUI leaves; main then stops the session
 		case "a", "r", "i", "p":
 			return m.openSetup()
 		}
@@ -219,8 +223,15 @@ func RunSetup(d Deps) error {
 	return err
 }
 
-// RunStatus runs the live status screen (blocking).
-func RunStatus(s *Session, d Deps) error {
-	_, err := tea.NewProgram(newStatusModel(s, d), tea.WithAltScreen()).Run()
+// RunStatus runs the live status screen (blocking). onStart is called once the
+// program exists, so callers can wire up the tray there: a tray Quit can then
+// always reach QuitUI, even if it is clicked immediately.
+func RunStatus(s *Session, d Deps, onStart func()) error {
+	prog := tea.NewProgram(newStatusModel(s, d), tea.WithAltScreen())
+	s.QuitUI = prog.Quit
+	if onStart != nil {
+		onStart()
+	}
+	_, err := prog.Run()
 	return err
 }
