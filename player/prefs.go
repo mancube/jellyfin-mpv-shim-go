@@ -50,8 +50,13 @@ var subtitleColors = []struct {
 	{"Gray", "#FF808080"},
 }
 
-// prefsMenu is the Video Preferences / Player Preferences root.
+// openVideoPrefs opens the Video Preferences page from wherever we are.
 func (m *menu) openVideoPrefs() {
+	m.pushPrefs(videoPrefsTitle, m.videoPrefsEntries())
+}
+
+// videoPrefsEntries builds the Video Preferences rows.
+func (m *menu) videoPrefsEntries() []menuEntry {
 	o := m.p.Options()
 	var entries []menuEntry
 	entries = append(entries,
@@ -64,10 +69,16 @@ func (m *menu) openVideoPrefs() {
 		m.toggle("Transcode Dolby Vision", o.TranscodeDolbyVision, m.setTranscodeDV),
 		m.toggle("Direct Paths", o.DirectPaths, m.setDirectPaths),
 	)
-	m.pushPrefs("Video Preferences", entries)
+	return entries
 }
 
+// openPlayerPrefs opens the Player Preferences page.
 func (m *menu) openPlayerPrefs() {
+	m.pushPrefs(playerPrefsTitle, m.playerPrefsEntries())
+}
+
+// playerPrefsEntries builds the Player Preferences rows.
+func (m *menu) playerPrefsEntries() []menuEntry {
 	o := m.p.Options()
 	entries := []menuEntry{
 		m.toggle("Auto Play", o.AutoPlay, m.setAutoPlay),
@@ -83,7 +94,7 @@ func (m *menu) openPlayerPrefs() {
 		m.toggle("Ask to Skip Credits", o.SkipCredits, m.setSkipCreditsAsk),
 		m.toggle("Mouse Menu", o.MenuMouse, m.setMenuMouse),
 	}
-	m.pushPrefs("Player Preferences", entries)
+	return entries
 }
 
 // toggle renders a checkbox row.
@@ -110,8 +121,9 @@ func (m *menu) setBool(set func(*Options, bool), apply func()) func(bool) {
 	}
 }
 
-// pushPrefs shows a preferences frame, remembering which one so a change can
-// re-render it (upstream re-renders the preferences menu after a change).
+// pushPrefs opens a preferences page from its parent, remembering which one so
+// a change can re-render it in place (upstream re-renders the preferences menu
+// after a change).
 func (m *menu) pushPrefs(title string, entries []menuEntry) {
 	m.mu.Lock()
 	m.prefsTitle = title
@@ -119,21 +131,35 @@ func (m *menu) pushPrefs(title string, entries []menuEntry) {
 	m.push(title, entries, 0)
 }
 
-// backToRoot returns to the preferences frame after a change: one "back" pops
-// the current (sub)menu, then we re-push the preferences list with the new
-// values.
-func (m *menu) backToRoot() {
+// prefsEntries builds the rows of the preferences page we are in.
+func (m *menu) prefsEntries() (string, []menuEntry) {
 	m.mu.Lock()
 	title := m.prefsTitle
+	m.mu.Unlock()
+	switch title {
+	case playerPrefsTitle:
+		return title, m.playerPrefsEntries()
+	default:
+		return videoPrefsTitle, m.videoPrefsEntries()
+	}
+}
+
+// backToRoot returns to the preferences page after a change. If we are in one of
+// its submenus we pop that single level first; then the page is *replaced* (not
+// re-pushed), so the parent link stays intact and "back" keeps walking up the
+// tree: submenu → preferences → root.
+func (m *menu) backToRoot() {
+	m.mu.Lock()
+	title, onPrefs := m.prefsTitle, m.shown && m.frame.title == m.prefsTitle
 	m.mu.Unlock()
 	if title == "" {
 		return
 	}
-	if title == videoPrefsTitle {
-		m.openVideoPrefs()
-		return
+	if !onPrefs {
+		m.Action("back") // leave the submenu we were in
 	}
-	m.openPlayerPrefs()
+	page, entries := m.prefsEntries()
+	m.replaceFrame(page, entries)
 }
 
 const (

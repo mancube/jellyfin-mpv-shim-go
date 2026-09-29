@@ -242,8 +242,24 @@ func (m *menu) Action(action string) {
 // push swaps in a submenu, remembering the current frame (upstream put_menu).
 func (m *menu) push(title string, entries []menuEntry, selected int) {
 	m.mu.Lock()
-	m.stacks = append(m.stacks, m.frame)
+	m.stacks = append(m.stacks, m.frame) // the page we came from = the parent
 	m.frame = menuFrame{title: title, entries: entries, selected: selected}
+	m.mu.Unlock()
+	m.refresh()
+}
+
+// replaceFrame redraws the *current* page with new entries, keeping the parent
+// link. A settings change re-renders the preferences page this way, so "back"
+// always walks one level up the tree instead of hopping to a duplicate of the
+// page we were already on.
+func (m *menu) replaceFrame(title string, entries []menuEntry) {
+	m.mu.Lock()
+	if !m.shown {
+		m.mu.Unlock()
+		return
+	}
+	m.frame = menuFrame{title: title, entries: entries, selected: 0}
+	m.mouseBack = false
 	m.mu.Unlock()
 	m.refresh()
 }

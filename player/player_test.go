@@ -1650,3 +1650,43 @@ func TestApplySubtitleStylePosition(t *testing.T) {
 		t.Errorf("sub-pos for middle = %v, want 80", got)
 	}
 }
+
+// ESC walks up the menu tree, one level at a time. A setting change re-renders
+// the preferences page *in place*: it used to pop and re-push it, which left a
+// duplicate on the stack, so the first ESC landed on the same page again
+// instead of the parent.
+func TestMenuEscWalksUpTheTree(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetSaveFunc(func(Options) {})
+
+	title := func() string {
+		lines := strings.Split(h.fm.lastText(), "\n")
+		if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+			return "<closed>"
+		}
+		return lines[0]
+	}
+	at := func(want string) {
+		t.Helper()
+		if got := title(); got != want {
+			t.Fatalf("menu page = %q, want %q", got, want)
+		}
+	}
+
+	h.pl.Key("menu")
+	at("Main Menu")
+	moveTo(h.pl, h.fm, videoPrefsTitle)
+	h.pl.Key("ok")
+	at(videoPrefsTitle)
+	moveTo(h.pl, h.fm, "Subtitle Size")
+	h.pl.Key("ok")
+	at("Select Subtitle Size")
+	moveTo(h.pl, h.fm, "Huge")
+	h.pl.Key("ok")
+	at(videoPrefsTitle) // the change re-renders this page, it does not move
+	h.pl.Key("back")
+	at("Main Menu") // one level up: the parent
+	h.pl.Key("back")
+	at("<closed>") // and the root closes the menu
+}
