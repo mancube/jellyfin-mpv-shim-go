@@ -682,13 +682,28 @@ func TestKeyFallbackSeekWhenMenuClosed(t *testing.T) {
 }
 
 func TestIntroSkipOnce(t *testing.T) {
+	// "Ask to skip" (skip_intro): only near the end of the segment.
 	h := setup(t)
 	c := cfg()
 	c.SkipIntro = true
 	playOne(t, h, c)
 
-	h.fm.SetProperty("time-pos", 5.0)
+	h.fm.SetProperty("time-pos", 5.0) // intro is 0-30 s
 	before := h.fm.numCmds()
+	h.pl.Tick()
+	h.fm.mu.Lock()
+	cmds := strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if strings.Contains(cmds, "absolute") {
+		t.Errorf("skipped too early in ask mode: %q", cmds)
+	}
+	if txt := h.fm.lastText(); txt != "Seek to Skip Intro" {
+		t.Errorf("OSD text = %q, want the prompt", txt)
+	}
+
+	// Within the window it skips for real, once.
+	h.fm.SetProperty("time-pos", 20.0)
+	before = h.fm.numCmds()
 	h.pl.Tick()
 	h.fm.mu.Lock()
 	got := strings.Join(h.fm.cmds[before:], "|")
@@ -699,12 +714,32 @@ func TestIntroSkipOnce(t *testing.T) {
 	if txt := h.fm.lastText(); txt != "Skipped Intro" {
 		t.Errorf("OSD text = %q, want %q", txt, "Skipped Intro")
 	}
-	// Triggered once only.
 	before = h.fm.numCmds()
-	h.fm.SetProperty("time-pos", 6.0)
+	h.fm.SetProperty("time-pos", 21.0)
 	h.pl.Tick()
 	if h.fm.numCmds() != before {
 		t.Error("intro skip repeated after HasTriggered")
+	}
+}
+
+// "Always skip" (skip_intro_always) jumps as soon as the segment starts.
+func TestIntroSkipAlways(t *testing.T) {
+	h := setup(t)
+	c := cfg()
+	c.SkipIntro = true // the segments are fetched; the *option* decides how
+	playOne(t, h, c)
+	o := h.pl.Options()
+	o.SkipIntro, o.SkipIntroAlways = false, true // "always skip", no prompt
+	h.pl.SetOptions(o)
+
+	h.fm.SetProperty("time-pos", 1.0)
+	before := h.fm.numCmds()
+	h.pl.Tick()
+	h.fm.mu.Lock()
+	got := strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if !strings.Contains(got, "30") {
+		t.Errorf("always-skip did not seek to the intro end: %q", got)
 	}
 }
 
@@ -1235,5 +1270,213 @@ func TestReportedVolumeIsClamped(t *testing.T) {
 	_, pr, _, _ := h.recs.snapshot()
 	if got := pr[len(pr)-1].VolumeLevel; got != 100 {
 		t.Errorf("reported VolumeLevel = %d, want 100 (clamped)", got)
+	}
+}
+
+// --- settings: rebinding, seek steps, prefs menus ---------------------------
+
+// The keybinding table is the default set plus the user's overrides, and an
+// empty action unbinds a key.
+func TestKeyBindingOverrides(t *testing.T) {
+	o := DefaultOptions()
+	if _, ok := o.keyBindings()["c"]; !ok {
+		t.Fatal("default menu key missing")
+	}
+	o.Keys = map[string]string{"c": "fullscreen", "x": "menu", "q": ""}
+	got := o.keyBindings()
+	if got["c"] != "fullscreen" {
+		t.Errorf("c = %q, want fullscreen", got["c"])
+	}
+	if got["x"] != "menu" {
+		t.Errorf("x = %q, want menu", got["x"])
+	}
+	if _, ok := got["q"]; ok {
+		t.Error("q was explicitly unbound but is still bound")
+	}
+}
+
+// The arrow keys seek by the configured steps, and exact seeks ask mpv for a
+// keyframe-accurate jump.
+func TestConfigurableSeekSteps(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	o := h.pl.Options()
+	o.SeekLeft, o.SeekRight, o.SeekUp = -15, 30, 120
+	h.pl.SetOptions(o)
+
+	before := h.fm.numCmds()
+	h.pl.Key("right")
+	h.pl.Key("up")
+	h.fm.mu.Lock()
+	cmds := strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if !strings.Contains(cmds, "seek30relative") || !strings.Contains(cmds, "seek120relative") {
+		t.Errorf("configured steps not used: %q", cmds)
+	}
+
+	o.SeekHExact = true
+	h.pl.SetOptions(o)
+	before = h.fm.numCmds()
+	h.pl.Key("right")
+	h.fm.mu.Lock()
+	cmds = strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if !strings.Contains(cmds, "relative+exact") {
+		t.Errorf("exact seek flag missing: %q", cmds)
+	}
+}
+
+// The preferences menus render the current settings and a selection changes
+// them, applies where relevant, and persists.
+func TestPrefsMenusChangeSettings(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	var saved int
+	h.pl.SetSaveFunc(func() { saved++ })
+
+	h.pl.Key("menu")
+	// Video Preferences is a row in the root menu.
+	root := h.fm.lastText()
+	if !strings.Contains(root, "Video Preferences") || !strings.Contains(root, "Player Preferences") {
+		t.Fatalf("prefs rows missing from the root menu:\n%s", root)
+	}
+	moveTo(h.pl, h.fm, "Video Preferences")
+	h.pl.Key("ok")
+	prefs := h.fm.lastText()
+	if !strings.Contains(prefs, "Subtitle Size") || !strings.Contains(prefs, "Transcode HDR") {
+		t.Fatalf("video prefs = %q", prefs)
+	}
+	// Toggle "Transcode HDR".
+	moveTo(h.pl, h.fm, "Transcode HDR")
+	h.pl.Key("ok")
+	if !h.pl.Options().TranscodeHDR {
+		t.Error("Transcode HDR toggle did not take")
+	}
+	if saved == 0 {
+		t.Error("preference change was not persisted")
+	}
+	// …and we are back in the prefs menu, with the checkmark.
+	prefs = h.fm.lastText()
+	if !strings.Contains(prefs, "✔ Transcode HDR") {
+		t.Errorf("prefs menu not re-rendered with the new state:\n%s", prefs)
+	}
+}
+
+// The subtitle submenu changes mpv's sub-* properties straight away.
+func TestSubtitleSizeMenuAppliesToMpv(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, videoPrefsTitle)
+	h.pl.Key("ok") // Video Preferences
+	moveTo(h.pl, h.fm, "Subtitle Size")
+	h.pl.Key("ok") // Subtitle Size
+	if got := h.fm.lastText(); !strings.Contains(got, "Select Subtitle Size") {
+		t.Fatalf("subtitle size menu = %q", got)
+	}
+	moveTo(h.pl, h.fm, "Huge")
+	h.pl.Key("ok")
+	if got := h.pl.Options().SubSize; got != 200 {
+		t.Errorf("SubSize = %d, want 200", got)
+	}
+	if got := h.fm.prop("sub-scale"); got != "2.00" {
+		t.Errorf("mpv sub-scale = %v, want 2.00", got)
+	}
+}
+
+// moveTo selects a menu row by label, wrapping like the menu itself.
+func moveTo(pl *Player, fm *fakeMpv, label string) {
+	rows, sel := menuRows(fm.lastText())
+	target := -1
+	for i, r := range rows {
+		if strings.Contains(r, label) {
+			target = i
+			break
+		}
+	}
+	if target < 0 || sel == target {
+		return
+	}
+	steps := (target - sel + len(rows)) % len(rows)
+	key := "down"
+	if steps > len(rows)/2 { // go the short way
+		steps = len(rows) - steps
+		key = "up"
+	}
+	for i := 0; i < steps; i++ {
+		pl.Key(key)
+	}
+}
+
+// menuRows parses the rendered menu: the entry labels and the selected index
+// (the menu marks it with ** … **).
+func menuRows(text string) (rows []string, selected int) {
+	for i, line := range strings.Split(text, "\n") {
+		if i == 0 {
+			continue // the title
+		}
+		rows = append(rows, line)
+		if strings.Contains(line, "**") {
+			selected = len(rows) - 1
+		}
+	}
+	return rows, selected
+}
+
+// indexOfRow returns the menu row index of a label (0-based, as rendered).
+func indexOfRow(text, label string) int {
+	rows := 0
+	for i, line := range strings.Split(text, "\n") {
+		if i == 0 {
+			continue // the title
+		}
+		if strings.Contains(line, label) {
+			return rows
+		}
+		rows++
+	}
+	return -1
+}
+
+// compareVersions orders dotted versions; the update check uses it.
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"1.2.3", "1.2.3", 0},
+		{"1.3.0", "1.2.9", 1},
+		{"1.2.0", "1.10.0", -1},
+		{"2.0", "1.9.9", 1},
+	}
+	for _, c := range cases {
+		if got := compareVersions(c.a, c.b); got != c.want {
+			t.Errorf("compareVersions(%q,%q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestUpdateCheckFindsNewerRelease(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"tag_name": "v9.9.9", "html_url": "https://example/releases/v9.9.9",
+		})
+	}))
+	defer srv.Close()
+
+	h := setup(t)
+	h.pl.SetVersion("0.1.0")
+	h.pl.SetUpdateURL(srv.URL)
+	h.pl.SetUpdateEnabled(true)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !h.pl.HasUpdate() {
+		if time.Now().After(deadline) {
+			t.Fatal("update check did not report the newer release")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := h.pl.UpdateVersion(); got != "v9.9.9" {
+		t.Errorf("UpdateVersion = %q, want v9.9.9", got)
 	}
 }

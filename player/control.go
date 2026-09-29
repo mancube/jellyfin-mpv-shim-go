@@ -6,7 +6,11 @@ package player
 // afterwards so the web UI's remote panel stays in sync (upstream's
 // timeline_handle()).
 
-import "mpv-shim/jfin"
+import (
+	"strconv"
+
+	"mpv-shim/jfin"
+)
 
 // Key bindings we claim at startup (upstream's kb_* defaults). The command is
 // an mpv script-message; Player.handleClientMessage routes it. A single
@@ -38,12 +42,22 @@ func (p *Player) BindKeys() {
 }
 
 // handleClientMessage is the mpv client-message hook: our key bindings and
-// (later) lua scripts speak through it.
+// the mouse script speak through it.
 func (p *Player) handleClientMessage(args []string) {
 	if len(args) < 2 || args[0] != "shim-menu" {
 		return
 	}
-	p.Key(args[1])
+	switch args[1] {
+	case "select":
+		// mouse hover: highlight a row (upstream menu.mouse_select)
+		if n, err := strconv.Atoi(args[2]); err == nil {
+			p.menu.mouseSelect(n)
+		}
+	case "click":
+		p.menu.mouseClick()
+	default:
+		p.Key(args[1])
+	}
 }
 
 // Key is one key/remote action, shared by the mpv key bindings and the

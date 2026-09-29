@@ -31,17 +31,30 @@ type Options struct {
 	SubColor    string
 	SubPosition string // bottom | top | middle
 
-	// Behaviour toggles.
-	AutoPlay        bool
-	Fullscreen      bool
-	RaiseMPV        bool
-	EnableOSC       bool
-	ForceSetPlayed  bool
-	PlaybackTimeout time.Duration
-	IdleCmdDelay    time.Duration
-	ShellCmds       ShellCmds
-	SanitizeOutput  bool
-	DevLogDecisions bool
+	// Behaviour toggles. The OSD preference menus (prefs.go) write these live
+	// and call Save, so they must stay in sync with config.json.
+	AutoPlay             bool
+	Fullscreen           bool
+	RaiseMPV             bool
+	EnableOSC            bool
+	ForceSetPlayed       bool
+	SkipIntro            bool
+	SkipIntroAlways      bool
+	SkipCredits          bool
+	SkipCreditsAlways    bool
+	MenuMouse            bool
+	WriteLogs            bool
+	CheckUpdates         bool
+	TranscodeHi10p       bool
+	TranscodeHDR         bool
+	TranscodeDolbyVision bool
+	DirectPaths          bool
+	RemoteKbps           int // transcode quality preset
+	PlaybackTimeout      time.Duration
+	IdleCmdDelay         time.Duration
+	ShellCmds            ShellCmds
+	SanitizeOutput       bool
+	DevLogDecisions      bool
 }
 
 // ShellCmds are the upstream lifecycle hooks, run detached and best-effort.
@@ -58,6 +71,10 @@ func DefaultOptions() Options {
 		SeekDown:        -60,
 		SeekLeft:        -5,
 		SeekRight:       5,
+		RemoteKbps:      25000,
+		SkipIntro:       true,
+		SkipCredits:     true,
+		MenuMouse:       true,
 		SubSize:         100,
 		SubColor:        "#FFFFFFFF",
 		SubPosition:     "bottom",
@@ -141,6 +158,16 @@ func (p *Player) saveNowLocked() {
 	if p.save != nil {
 		p.save()
 	}
+}
+
+// RemoteKbps is the configured transcode quality (remote_kbps).
+func (p *Player) RemoteKbps() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.opt.RemoteKbps > 0 {
+		return p.opt.RemoteKbps
+	}
+	return 25000
 }
 
 // ApplySubtitleStyle pushes the subtitle size/colour/position to mpv. Port of

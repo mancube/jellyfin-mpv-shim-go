@@ -48,6 +48,7 @@ type Player struct {
 	lastTick    time.Time
 	crashLoop   int             // consecutive crash restarts without playback progress
 	initialEcho map[string]bool // first property-change per prop is mpv's echo
+	prompted    bool            // intro "ask to skip" prompt already shown
 	lastReport  time.Time       // last progress report we sent (report throttling)
 	// idle-stop: when > 0, playback is stopped after this long without
 	// activity (upstream stop_idle + idle_cmd_delay).
@@ -59,6 +60,11 @@ type Player struct {
 	// preference menus.
 	opt  Options
 	save func()
+
+	// update check (upstream update_check.py)
+	updateURL     string
+	updateEnabled bool
+	version       string
 	// PauseReport mirrors the pause_report setting: report immediately when
 	// the remote pauses/unpauses.
 	PauseReport bool
@@ -162,6 +168,7 @@ func (p *Player) idleCheckLocked() {
 	if p.idleStop <= 0 || p.stopping || p.media == nil {
 		return // nothing loaded: there is no playback to stop
 	}
+	_ = p.lastPause // a paused player is idle; the stop below handles it
 	if !p.aborted() && !p.lastPause {
 		p.touchLocked() // playing: not idle
 		return
@@ -264,6 +271,11 @@ func (p *Player) afterSpawn(ctx context.Context) {
 // video output), and retrying forever just burns CPU and spawns processes.
 const maxCrashRestarts = 3
 
+// introSkipWindow is how close to the end of an intro/credits segment the
+// automatic skip (and the "ask to skip" prompt) kicks in. Upstream uses
+// settings.local_kbps-derived timing; 15 s matches its UX for most content.
+const introSkipWindow = 15 * time.Second
+
 // observedProps are the mpv properties we watch for immediate UI feedback.
 var observedProps = []string{"pause", "mute", "volume", "seeking", "time-pos", "aid", "sid"}
 
@@ -324,6 +336,7 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 		p.raiseWindowLocked()
 	}
 	p.runShell("play_cmd", p.opt.ShellCmds.Play)
+	p.loadChaptersLocked()
 	if offset > 0 {
 		p.lastSeek = offset
 		p.lastPos = offset
@@ -811,13 +824,15 @@ func (p *Player) volumeChangedLocked() bool {
 // setting applies. Note: always-skip and prompt-only are the same boolean
 // here; add separate flags if that distinction is ever wanted.
 func (p *Player) introCheckLocked() {
-	if p.media == nil || p.aborted() || p.menu.Shown() {
+	// Note: no menu check here — the menu pauses playback, so the paused
+	// branch of Tick already covers it, and asking the menu for its state
+	// while holding p.mu would invert the lock order.
+	if p.media == nil || p.aborted() {
 		return
 	}
-	cfg := p.media.Cfg
-	if !cfg.SkipIntro && !cfg.SkipCredits {
-		return
-	}
+	// Upstream splits "always skip" from "ask to skip"; both are honoured here:
+	// always → jump silently, ask → show the prompt.
+	o := p.opt
 	pos := p.lastPos
 	v := p.media.Video
 	for i := range v.Intros {
@@ -825,28 +840,41 @@ func (p *Player) introCheckLocked() {
 		if in.HasTriggered || pos < in.Start || pos > in.End {
 			continue
 		}
-		enabled := in.Type == "Outro" && cfg.SkipCredits
-		if in.Type != "Outro" {
-			enabled = cfg.SkipIntro
+		always, ask := o.SkipIntroAlways, o.SkipIntro
+		if in.Type == "Outro" {
+			always, ask = o.SkipCreditsAlways, o.SkipCredits
 		}
-		if !enabled {
+		if !always && !ask {
 			continue
 		}
-		in.HasTriggered = true
-		p.log.Printf("skipping %s: seek to %.1fs", in.Type, in.End)
-		if err := p.mpv.Command("seek", in.End, "absolute+exact"); err != nil {
-			p.log.Printf("intro skip: %v", err)
+		if always || in.End-pos <= introSkipWindow.Seconds() {
+			in.HasTriggered = true
+			p.log.Printf("skipping %s: seek to %.1fs", in.Type, in.End)
+			if err := p.mpv.Command("seek", in.End, "absolute+exact"); err != nil {
+				p.log.Printf("intro skip: %v", err)
+				return
+			}
+			msg := "Skipped Intro"
+			if in.Type == "Outro" {
+				msg = "Skipped Credits"
+			}
+			p.mpv.ShowText(msg, 3000, 1)
+			p.lastPos = in.End
+			p.sendProgressLocked()
 			return
 		}
-		msg := "Skipped Intro"
-		if in.Type == "Outro" {
-			msg = "Skipped Credits"
+		// "Ask to skip": only prompt near the end of the segment.
+		if !p.prompted {
+			p.prompted = true
+			msg := "Seek to Skip Intro"
+			if in.Type == "Outro" {
+				msg = "Seek to Skip Credits"
+			}
+			p.mpv.ShowText(msg, 3000, 1)
 		}
-		p.mpv.ShowText(msg, 3000, 1)
-		p.lastPos = in.End
-		p.sendProgressLocked()
 		return
 	}
+	p.prompted = false
 }
 
 func abs(f float64) float64 {

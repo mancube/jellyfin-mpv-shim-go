@@ -267,6 +267,12 @@ func playerOptions(s *Settings) player.Options {
 	o.PlaybackTimeout = time.Duration(s.PlaybackTimeoutS) * time.Second
 	o.IdleCmdDelay = time.Duration(s.IdleCmdDelayS) * time.Second
 	o.SanitizeOutput = s.SanitizeOutput
+	o.RemoteKbps = s.RemoteKbps
+	o.SkipIntro, o.SkipCredits = s.SkipIntro, s.SkipCredits
+	o.SkipIntroAlways, o.SkipCreditsAlways = s.SkipIntroAlways, s.SkipCreditsAlways
+	o.MenuMouse, o.WriteLogs, o.CheckUpdates = s.MenuMouse, s.WriteLog, s.CheckUpdates
+	o.TranscodeHi10p, o.TranscodeHDR, o.TranscodeDolbyVision = s.TranscodeHi10p, s.TranscodeHDR, s.TranscodeDolbyVision
+	o.DirectPaths = s.DirectPaths || s.RemoteDirectPaths
 	o.ShellCmds = player.ShellCmds{
 		PreMedia: s.PreMediaCmd, Play: s.PlayCmd, Stop: s.StopCmd,
 		MediaEnded: s.MediaEndedCmd, Idle: s.IdleCmd, IdleEnded: s.IdleEndedCmd,
@@ -289,11 +295,15 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 		ConfigDir:  s.MpvConfigDir,
 		AuthHeader: client.AuthHeader(),
 		MediaKeys:  s.MediaKeys,
+		MenuMouse:  s.MenuMouse,
 		LogLevel:   mpvLogLevel(s),
 		Log:        lg,
 	})
 	pl := player.New(proc, lg)
 	pl.SetOptions(playerOptions(s))
+	pl.SetVersion(version)
+	pl.SetUpdateURL(s.UpdateURL)
+	pl.SetUpdateEnabled(s.CheckUpdates)
 	pl.SetSaveFunc(func() {
 		// The OSD preference menus change settings at runtime; write them back.
 		if err := s.Save(cfgPath); err != nil {

@@ -184,7 +184,9 @@ type Video struct {
 	SubtitleURL map[int]string
 	SubtitleEnc map[int]struct{}
 	// Intros fetched from MediaSegments, used to skip intro/credits.
-	Intros     []Intro
+	Intros []Intro
+	// Chapters fetched lazily (upstream get_chapters), used by the OSD menu.
+	Chapters   []Chapter
 	introTried bool
 }
 
