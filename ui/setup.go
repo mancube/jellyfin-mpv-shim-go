@@ -41,9 +41,8 @@ type setupModel struct {
 	inputs []textinput.Model
 	focus  int
 
-	qc        *jfin.QuickConnect
-	qcWait    int // seconds elapsed waiting for the exchange
-	quickUser string
+	qc     *jfin.QuickConnect
+	qcWait int // seconds elapsed waiting for the exchange
 }
 
 func newSetupModel(d Deps) setupModel {

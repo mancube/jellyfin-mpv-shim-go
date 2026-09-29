@@ -144,12 +144,10 @@ func (p *Player) MenuAction(action string) {
 	}
 }
 
-// seekBy seeks by delta seconds, optionally keyframe-exact (upstream
+// seekBy seeks by delta seconds, keyframe-exact when asked (upstream
 // seek_h_exact/seek_v_exact).
 func (p *Player) seekBy(delta float64, exact bool) {
 	if exact {
-		p.mu.Lock()
-		p.mu.Unlock()
 		p.seekExact(delta)
 		return
 	}

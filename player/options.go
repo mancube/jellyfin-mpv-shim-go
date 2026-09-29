@@ -49,12 +49,12 @@ type Options struct {
 	TranscodeHDR         bool
 	TranscodeDolbyVision bool
 	DirectPaths          bool
+	RemoteDirectPaths    bool
 	RemoteKbps           int // transcode quality preset
 	PlaybackTimeout      time.Duration
 	IdleCmdDelay         time.Duration
 	ShellCmds            ShellCmds
-	SanitizeOutput       bool
-	DevLogDecisions      bool
+	LogDecisions         bool // log the URL and track choices (upstream)
 }
 
 // ShellCmds are the upstream lifecycle hooks, run detached and best-effort.
@@ -128,13 +128,18 @@ func (o Options) keyBindings() map[string]string {
 	return out
 }
 
-// SetOptions installs the runtime options (called once at startup).
+// SetOptions installs the runtime options (at startup, and again whenever the
+// OSD preference menus change something).
 func (p *Player) SetOptions(o Options) {
 	p.mu.Lock()
 	p.opt = o
 	p.mu.Unlock()
 	if o.SubSize > 0 || o.SubColor != "" || o.SubPosition != "" {
 		p.ApplySubtitleStyle()
+	}
+	// Keybindings live in mpv: re-claim them if it is already running.
+	if p.mpv.Alive() {
+		p.BindKeys()
 	}
 }
 

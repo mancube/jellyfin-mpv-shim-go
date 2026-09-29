@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -312,4 +313,63 @@ func TestGeneralCommandSetVolumeFraction(t *testing.T) {
 	if got := mvp.props["volume"]; got != 70.0 {
 		t.Errorf("volume = %v, want 70", got)
 	}
+}
+
+// config → player options → config must be a no-op round trip: that is what
+// the OSD preference menus rely on when they write the settings back.
+func TestSettingsOptionsRoundTrip(t *testing.T) {
+	s := DefaultSettings()
+	s.SeekUp, s.SeekDown, s.SeekLeft, s.SeekRight = 120, -120, -15, 30
+	s.SeekHExact, s.MediaKeySeek, s.UseWebSeek = true, true, true
+	s.SubtitleSize, s.SubtitleColor, s.SubtitlePosition = 125, "#FFEE00EE", "top"
+	s.AutoPlay, s.Fullscreen, s.EnableOSC, s.RaiseMPV = false, false, false, false
+	s.SkipIntroAlways, s.SkipCredits = true, false
+	s.MenuMouse, s.WriteLog, s.CheckUpdates = false, true, false
+	s.TranscodeHi10p, s.TranscodeHDR, s.TranscodeDolbyVision = true, true, false
+	s.DirectPaths, s.RemoteDirectPaths = false, true // the menu must not merge these
+	s.RemoteKbps = 4000
+	s.KeyBindings = map[string]string{"c": "fullscreen"}
+
+	before := s
+	applyOptionsToSettings(&s, playerOptions(&s))
+	if !reflect.DeepEqual(before, s) {
+		t.Errorf("round trip changed the settings:\nbefore %+v\nafter  %+v", before, s)
+	}
+}
+
+// A preference change (menu goroutine) concurrent with a Play (WS goroutine)
+// must not race: both touch the shared Settings.
+func TestSettingsConcurrentAccess(t *testing.T) {
+	ts := playServer(t)
+	c := jfin.New(ts.URL, "test", "dev1", "1.0", false)
+	c.Token, c.UserID = "tok", "u"
+	pl := player.New(newMinimalMvp(), log.New(io.Discard, "", 0))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pl.Start(ctx)
+
+	s := DefaultSettings()
+	pl.SetSaveFunc(func(o player.Options) { applyOptionsToSettings(&s, o) })
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	// "menu" side: flip preferences.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			o := player.DefaultOptions()
+			o.AutoPlay = i%2 == 0
+			o.SeekRight = float64(i)
+			applyOptionsToSettings(&s, o)
+			_ = mediaConfig(&s)
+		}
+		close(stop)
+	}()
+	// "server" side: plays read the same settings.
+	for i := 0; i < 20; i++ {
+		handlePlay(ctx, c, pl, mediaConfig(&s), playData(t, "PlayNow", "a"))
+	}
+	wg.Wait()
+	<-stop
 }

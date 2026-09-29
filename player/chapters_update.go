@@ -79,11 +79,7 @@ type UpdateState struct {
 }
 
 // HasUpdate reports whether a newer release was found.
-func (p *Player) HasUpdate() bool {
-	p.updMu.Lock()
-	defer p.updMu.Unlock()
-	return p.update.Available
-}
+func (p *Player) HasUpdate() bool { return p.NotifyUpdate() }
 
 // UpdateVersion returns the newest release tag we found.
 func (p *Player) UpdateVersion() string {
@@ -97,7 +93,6 @@ func (p *Player) SetVersion(v string) {
 	p.mu.Lock()
 	p.version = v
 	p.mu.Unlock()
-	currentVersion = func() string { return v }
 }
 
 // clock formats seconds as m:ss (same helper shape as the TUI's).
@@ -121,6 +116,17 @@ func (p *Player) SetUpdateEnabled(on bool) {
 	}
 }
 
+// SetUpdateNotify controls whether an available update is surfaced in the
+// TUI/tray/menu (upstream notify_updates).
+func (p *Player) SetUpdateNotify(on bool) { p.updateNotify = on }
+
+// NotifyUpdate reports whether an available update should be shown.
+func (p *Player) NotifyUpdate() bool {
+	p.updMu.Lock()
+	defer p.updMu.Unlock()
+	return p.update.Available && p.updateNotify
+}
+
 // CheckUpdate polls the update URL once in the background. It is a single
 // request with a short timeout: never block startup, never retry in a loop.
 // The URL defaults to *this project's* release feed (see main.go), not
@@ -133,7 +139,7 @@ func (p *Player) CheckUpdate() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		rel, err := p.fetchLatestRelease(ctx)
-		if err != nil || rel == "" || !newerThanCurrent(rel) {
+		if err != nil || rel == "" || !p.newerThanCurrent(rel) {
 			return
 		}
 		p.updMu.Lock()
@@ -186,13 +192,11 @@ func (p *Player) fetchLatestRelease(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("no release at %s", p.updateURL)
 }
 
-// currentVersion is set by SetVersion at startup; the package default keeps the
-// comparison working in tests.
-var currentVersion = func() string { return "" }
-
 // newerThanCurrent compares "v1.2.3" style tags against our build version.
-func newerThanCurrent(tag string) bool {
-	cur := strings.TrimPrefix(strings.TrimSpace(currentVersion()), "v")
+func (p *Player) newerThanCurrent(tag string) bool {
+	p.mu.Lock()
+	cur := strings.TrimPrefix(strings.TrimSpace(p.version), "v")
+	p.mu.Unlock()
 	newer := strings.TrimPrefix(strings.TrimSpace(tag), "v")
 	if cur == "" || cur == "dev" {
 		return true

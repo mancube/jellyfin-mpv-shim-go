@@ -71,6 +71,9 @@ type Settings struct {
 	TranscodeHi10p       bool   `json:"transcode_hi10p"`
 	TranscodeHDR         bool   `json:"transcode_hdr"`
 	TranscodeDolbyVision bool   `json:"transcode_dolby_vision"`
+	TranscodeHEVC        bool   `json:"transcode_hevc"`
+	TranscodeAV1         bool   `json:"transcode_av1"`
+	Transcode4K          bool   `json:"transcode_4k"`
 	ForceVideoCodec      string `json:"force_video_codec,omitempty"`
 	ForceAudioCodec      string `json:"force_audio_codec,omitempty"`
 
@@ -85,6 +88,7 @@ type Settings struct {
 	MenuMouse         bool   `json:"menu_mouse"`
 	ScreenshotDir     string `json:"screenshot_dir,omitempty"`
 	SanitizeOutput    bool   `json:"sanitize_output"`
+	LogDecisions      bool   `json:"log_decisions"` // log the playback URL and track choices
 	CheckUpdates      bool   `json:"check_updates"`
 	NotifyUpdates     bool   `json:"notify_updates"`
 	UpdateURL         string `json:"update_url,omitempty"`

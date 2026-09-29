@@ -1469,21 +1469,6 @@ func menuRows(text string) (rows []string, selected int) {
 	return rows, selected
 }
 
-// indexOfRow returns the menu row index of a label (0-based, as rendered).
-func indexOfRow(text, label string) int {
-	rows := 0
-	for i, line := range strings.Split(text, "\n") {
-		if i == 0 {
-			continue // the title
-		}
-		if strings.Contains(line, label) {
-			return rows
-		}
-		rows++
-	}
-	return -1
-}
-
 // compareVersions orders dotted versions; the update check uses it.
 func TestCompareVersions(t *testing.T) {
 	cases := []struct {

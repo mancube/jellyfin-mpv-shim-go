@@ -11,8 +11,6 @@ import (
 	"testing"
 )
 
-func ptr[T any](v T) *T { return &v }
-
 // TestDeviceProfileGolden pins the profile JSON against the upstream
 // (v2.10) static structure, with the kbps/codec knobs applied.
 func TestDeviceProfileGolden(t *testing.T) {

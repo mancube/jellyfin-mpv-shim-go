@@ -64,6 +64,7 @@ type Player struct {
 	// update check (upstream update_check.py)
 	updateURL     string
 	updateEnabled bool
+	updateNotify  bool
 	updMu         sync.Mutex
 	update        UpdateState
 	version       string
@@ -89,8 +90,9 @@ func New(mpv Mpv, lg *log.Logger) *Player {
 	// pause_report defaults on; initialEcho collects mpv's subscribe echoes.
 	p := &Player{
 		mpv: mpv, log: lg, PauseReport: true,
-		initialEcho: map[string]bool{},
-		opt:         DefaultOptions(),
+		initialEcho:  map[string]bool{},
+		opt:          DefaultOptions(),
+		updateNotify: true, // notify_updates defaults on
 	}
 	p.menu = newMenu(p)
 	return p
@@ -304,6 +306,9 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	}
 	if url == "" {
 		return errors.New("no playable URL")
+	}
+	if p.opt.LogDecisions {
+		p.log.Printf("Playing: %s", url)
 	}
 	p.pauseIgnore = true
 	p.doNotHandlePause = true

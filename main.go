@@ -228,8 +228,18 @@ type session struct {
 }
 
 // newSession wires the client, mpv, player and WS event handlers.
+// settingsMu guards Settings: the OSD preference menus write it (from the menu
+// event goroutine) while Play handlers read it (from their own goroutines).
+var settingsMu sync.Mutex
+
 // mediaConfig maps the config onto the media/device-profile options.
 func mediaConfig(s *Settings) jfin.MediaConfig {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	return mediaConfigLocked(s)
+}
+
+func mediaConfigLocked(s *Settings) jfin.MediaConfig {
 	rules := make([]jfin.LanguageRule, 0, len(s.LanguageConfig))
 	for _, r := range s.LanguageConfig {
 		rules = append(rules, jfin.LanguageRule{
@@ -246,6 +256,9 @@ func mediaConfig(s *Settings) jfin.MediaConfig {
 		TranscodeHi10p:       s.TranscodeHi10p,
 		TranscodeHDR:         s.TranscodeHDR,
 		TranscodeDolbyVision: s.TranscodeDolbyVision,
+		TranscodeHEVC:        s.TranscodeHEVC,
+		TranscodeAV1:         s.TranscodeAV1,
+		Transcode4K:          s.Transcode4K,
 		ForceVideoCodec:      s.ForceVideoCodec,
 		ForceAudioCodec:      s.ForceAudioCodec,
 		DirectPaths:          s.DirectPaths,
@@ -270,13 +283,13 @@ func playerOptions(s *Settings) player.Options {
 	o.ForceSetPlayed = s.ForceSetPlayed
 	o.PlaybackTimeout = time.Duration(s.PlaybackTimeoutS) * time.Second
 	o.IdleCmdDelay = time.Duration(s.IdleCmdDelayS) * time.Second
-	o.SanitizeOutput = s.SanitizeOutput
+	o.LogDecisions = s.LogDecisions
 	o.RemoteKbps = s.RemoteKbps
 	o.SkipIntro, o.SkipCredits = s.SkipIntro, s.SkipCredits
 	o.SkipIntroAlways, o.SkipCreditsAlways = s.SkipIntroAlways, s.SkipCreditsAlways
 	o.MenuMouse, o.WriteLogs, o.CheckUpdates = s.MenuMouse, s.WriteLog, s.CheckUpdates
 	o.TranscodeHi10p, o.TranscodeHDR, o.TranscodeDolbyVision = s.TranscodeHi10p, s.TranscodeHDR, s.TranscodeDolbyVision
-	o.DirectPaths = s.DirectPaths || s.RemoteDirectPaths
+	o.DirectPaths, o.RemoteDirectPaths = s.DirectPaths, s.RemoteDirectPaths
 	o.ShellCmds = player.ShellCmds{
 		PreMedia: s.PreMediaCmd, Play: s.PlayCmd, Stop: s.StopCmd,
 		MediaEnded: s.MediaEndedCmd, Idle: s.IdleCmd, IdleEnded: s.IdleEndedCmd,
@@ -287,6 +300,8 @@ func playerOptions(s *Settings) player.Options {
 // applyOptionsToSettings copies the player's runtime options back into the
 // config, so a change made in the OSD preference menus survives a restart.
 func applyOptionsToSettings(s *Settings, o player.Options) {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
 	s.SeekUp, s.SeekDown, s.SeekLeft, s.SeekRight = o.SeekUp, o.SeekDown, o.SeekLeft, o.SeekRight
 	s.SeekHExact, s.SeekVExact, s.UseWebSeek = o.SeekHExact, o.SeekVExact, o.UseWebSeek
 	s.MediaKeySeek = o.MediaKeySeek
@@ -298,7 +313,7 @@ func applyOptionsToSettings(s *Settings, o player.Options) {
 	s.MenuMouse, s.WriteLog, s.CheckUpdates = o.MenuMouse, o.WriteLogs, o.CheckUpdates
 	s.TranscodeHi10p, s.TranscodeHDR = o.TranscodeHi10p, o.TranscodeHDR
 	s.TranscodeDolbyVision = o.TranscodeDolbyVision
-	s.DirectPaths = o.DirectPaths
+	s.DirectPaths, s.RemoteDirectPaths = o.DirectPaths, o.RemoteDirectPaths
 	s.RemoteKbps = o.RemoteKbps
 	if len(o.Keys) > 0 {
 		s.KeyBindings = o.Keys
@@ -335,6 +350,7 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	}
 	pl.SetUpdateURL(updateURL)
 	pl.SetUpdateEnabled(s.CheckUpdates)
+	pl.SetUpdateNotify(s.NotifyUpdates)
 	pl.SetSaveFunc(func(o player.Options) {
 		// The OSD preference menus change settings at runtime: copy the new
 		// options into the config and persist. (Called with the player's lock
@@ -482,7 +498,7 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 		}
 	}
 	uiSess.UpdateNote = func() string {
-		if sess.pl.HasUpdate() {
+		if s.NotifyUpdates && sess.pl.HasUpdate() {
 			return "mpv-shim " + sess.pl.UpdateVersion() + " is available"
 		}
 		return ""
