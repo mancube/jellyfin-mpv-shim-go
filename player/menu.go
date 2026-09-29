@@ -25,13 +25,12 @@ type menuFrame struct {
 }
 
 type menu struct {
-	p          *Player
-	mu         sync.Mutex // guards the menu state only; never held across p.mu
-	shown      bool
-	mouseBack  bool
-	prefsTitle string // which preferences frame we are in, for re-rendering
-	stacks     []menuFrame
-	frame      menuFrame
+	p         *Player
+	mu        sync.Mutex // guards the menu state only; never held across p.mu
+	shown     bool
+	mouseBack bool
+	stacks    []menuFrame
+	frame     menuFrame
 	// saved OSD properties, restored on hide
 	savedColor       string
 	savedFontSize    int

@@ -31,6 +31,24 @@ type Options struct {
 	SubColor    string
 	SubPosition string // bottom | top | middle
 
+	// Transcode quality and codec policy (per play, read from settings).
+	RemoteKbps int
+	LocalKbps  int
+	// AlwaysTranscode = "disable direct play" (upstream always_transcode).
+	AlwaysTranscode bool
+	TranscodeH265   bool // allow h265/hevc as a transcode target
+	ForceH264       bool // …or force h264
+	ForceVideoCodec string
+	ForceAudioCodec string
+
+	// Idle behaviour: stop after IdleStopAfter of idleness.
+	IdleStop      bool
+	IdleStopAfter time.Duration
+
+	// Logging: mpv's msg-level, and whether to redact tokens from our log.
+	LogLevel       string
+	SanitizeOutput bool
+
 	// Behaviour toggles. The OSD preference menus (prefs.go) write these live
 	// and call Save, so they must stay in sync with config.json.
 	AutoPlay             bool
@@ -50,7 +68,6 @@ type Options struct {
 	TranscodeDolbyVision bool
 	DirectPaths          bool
 	RemoteDirectPaths    bool
-	RemoteKbps           int // transcode quality preset
 	PlaybackTimeout      time.Duration
 	IdleCmdDelay         time.Duration
 	ShellCmds            ShellCmds
@@ -72,6 +89,11 @@ func DefaultOptions() Options {
 		SeekLeft:        -5,
 		SeekRight:       5,
 		RemoteKbps:      25000,
+		LocalKbps:       10000,
+		IdleStop:        true,
+		IdleStopAfter:   time.Hour,
+		LogLevel:        "info",
+		SanitizeOutput:  true,
 		SkipIntro:       true,
 		SkipCredits:     true,
 		MenuMouse:       true,

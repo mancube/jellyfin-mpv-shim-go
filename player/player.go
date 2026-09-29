@@ -50,7 +50,6 @@ type Player struct {
 	lastReport  time.Time       // last progress report we sent (report throttling)
 	// idle-stop: when > 0, playback is stopped after this long without
 	// activity (upstream stop_idle + idle_cmd_delay).
-	idleStop     time.Duration
 	lastActivity time.Time
 	// ScreenshotDir is where TakeScreenshot writes frames.
 	ScreenshotDir string
@@ -153,12 +152,12 @@ func (p *Player) Status() Status {
 	return s
 }
 
-// SetIdleStop enables the idle stop: after d without playback (or without
-// any activity) the player stops, as upstream's stop_idle does. 0 disables.
-func (p *Player) SetIdleStop(d time.Duration) {
+// SetIdleStop is the startup shortcut for the idle_stop/idle_delay_s settings;
+// at runtime the preference menus change Options.IdleStop/IdleStopAfter.
+func (p *Player) SetIdleStop(enabled bool, after time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.idleStop = d
+	p.opt.IdleStop, p.opt.IdleStopAfter = enabled, after
 	p.lastActivity = time.Now()
 }
 
@@ -167,18 +166,19 @@ func (p *Player) touchLocked() { p.lastActivity = time.Now() }
 
 // idleCheckLocked implements the idle stop. Called from Tick.
 func (p *Player) idleCheckLocked() {
-	if p.idleStop <= 0 || p.stopping || p.media == nil {
+	if !p.opt.IdleStop || p.opt.IdleStopAfter <= 0 || p.stopping || p.media == nil {
 		return // nothing loaded: there is no playback to stop
 	}
+	stopAfter := p.opt.IdleStopAfter
 	// A paused player counts as idle; the stop below handles it.
 	if !p.aborted() && !p.lastPause {
 		p.touchLocked() // playing: not idle
 		return
 	}
-	if time.Since(p.lastActivity) < p.idleStop {
+	if time.Since(p.lastActivity) < stopAfter {
 		return
 	}
-	p.log.Printf("idle for %s — stopping playback", p.idleStop)
+	p.log.Printf("idle for %s — stopping playback", stopAfter)
 	p.touchLocked()
 	p.stopLocked()
 	if p.opt.ShellCmds.Idle != "" {

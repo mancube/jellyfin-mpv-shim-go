@@ -352,7 +352,13 @@ func playerOptionsLocked(s *Settings) player.Options {
 	o.PlaybackTimeout = time.Duration(s.PlaybackTimeoutS) * time.Second
 	o.IdleCmdDelay = time.Duration(s.IdleCmdDelayS) * time.Second
 	o.LogDecisions = s.LogDecisions
-	o.RemoteKbps = s.RemoteKbps
+	o.RemoteKbps, o.LocalKbps = s.RemoteKbps, s.LocalKbps
+	o.AlwaysTranscode, o.TranscodeH265, o.ForceH264 = s.AlwaysTranscode, s.TranscodeH265, s.ForceH264
+	o.ForceVideoCodec, o.ForceAudioCodec = s.ForceVideoCodec, s.ForceAudioCodec
+	o.IdleStop = s.IdleStop
+	o.IdleStopAfter = time.Duration(s.IdleDelayS) * time.Second
+	o.LogLevel = mpvLogLevel(s)
+	o.SanitizeOutput = s.SanitizeOutput
 	o.SkipIntro, o.SkipCredits = s.SkipIntro, s.SkipCredits
 	o.SkipIntroAlways, o.SkipCreditsAlways = s.SkipIntroAlways, s.SkipCreditsAlways
 	o.MenuMouse, o.WriteLogs, o.CheckUpdates = s.MenuMouse, s.WriteLog, s.CheckUpdates
@@ -384,7 +390,15 @@ func applyOptionsToSettings(s *Settings, o player.Options) {
 	s.TranscodeHi10p, s.TranscodeHDR = o.TranscodeHi10p, o.TranscodeHDR
 	s.TranscodeDolbyVision = o.TranscodeDolbyVision
 	s.DirectPaths, s.RemoteDirectPaths = o.DirectPaths, o.RemoteDirectPaths
-	s.RemoteKbps = o.RemoteKbps
+	s.RemoteKbps, s.LocalKbps = o.RemoteKbps, o.LocalKbps
+	s.AlwaysTranscode, s.TranscodeH265, s.ForceH264 = o.AlwaysTranscode, o.TranscodeH265, o.ForceH264
+	s.ForceVideoCodec, s.ForceAudioCodec = o.ForceVideoCodec, o.ForceAudioCodec
+	s.IdleStop = o.IdleStop
+	if o.IdleStopAfter > 0 {
+		s.IdleDelayS = int(o.IdleStopAfter.Seconds())
+	}
+	s.LogLevel = o.LogLevel
+	s.SanitizeOutput = o.SanitizeOutput
 	if len(o.Keys) > 0 {
 		s.KeyBindings = o.Keys
 	}
@@ -432,9 +446,7 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 			lg.Printf("saving config: %v", err)
 		}
 	})
-	if s.IdleStop {
-		pl.SetIdleStop(time.Duration(s.IdleDelayS) * time.Second)
-	}
+	pl.SetIdleStop(s.IdleStop, time.Duration(s.IdleDelayS)*time.Second)
 	pl.PauseReport = s.PauseReport
 	pl.ScreenshotDir = s.ScreenshotDir
 	if pl.ScreenshotDir == "" {

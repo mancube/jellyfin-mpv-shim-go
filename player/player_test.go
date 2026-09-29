@@ -765,7 +765,7 @@ func TestClientMessageOpensMenu(t *testing.T) {
 func TestIdleStopAfterDelay(t *testing.T) {
 	h := setup(t)
 	playOne(t, h, cfg())
-	h.pl.SetIdleStop(50 * time.Millisecond)
+	h.pl.SetIdleStop(true, 50*time.Millisecond)
 
 	// Playing: the idle timer keeps resetting.
 	h.fm.SetProperty("time-pos", 1.0)
@@ -795,7 +795,7 @@ func TestIdleStopAfterDelay(t *testing.T) {
 func TestIdleStopPausedStopsPlayback(t *testing.T) {
 	h := setup(t)
 	playOne(t, h, cfg())
-	h.pl.SetIdleStop(30 * time.Millisecond)
+	h.pl.SetIdleStop(true, 30*time.Millisecond)
 	h.pl.SetPaused(true)
 	time.Sleep(80 * time.Millisecond)
 	h.pl.Tick()
@@ -1875,5 +1875,99 @@ func TestScreenshotUsesScreenshotToFile(t *testing.T) {
 	}
 	if !strings.Contains(h.fm.lastText(), "/tmp/shots") {
 		t.Errorf("no confirmation with the file location: %q", h.fm.lastText())
+	}
+}
+
+// The OSD preferences must cover the settings that are not in the config file
+// only: local bitrate, codec policy, seek steps, idle stop, log level.
+func TestOSDCoversTranscodeAndPlaybackSettings(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetSaveFunc(func(Options) {})
+
+	// Video preferences: both bitrates and the codec toggles.
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, videoPrefsTitle)
+	h.pl.Key("ok")
+	video := h.fm.lastText()
+	for _, want := range []string{"Local Transcode Quality", "Remote Transcode Quality",
+		"Disable Direct Play", "Allow HEVC", "Force H.264"} {
+		if !strings.Contains(video, want) {
+			t.Errorf("video preferences missing %q:\n%s", want, video)
+		}
+	}
+
+	// Local bitrate is changeable and opens on the current value.
+	moveTo(h.pl, h.fm, "Local Transcode Quality")
+	h.pl.Key("ok")
+	if got := h.fm.lastText(); !strings.Contains(got, "Local Transcode Quality") {
+		t.Fatalf("local quality submenu = %q", got)
+	}
+	moveTo(h.pl, h.fm, "720p 3 Mbps")
+	h.pl.Key("ok")
+	if got := h.pl.Options().LocalKbps; got != 3000 {
+		t.Errorf("LocalKbps = %d, want 3000", got)
+	}
+
+	// Player preferences: seek steps, idle stop, log level, redaction.
+	h.pl.Key("back")
+	moveTo(h.pl, h.fm, playerPrefsTitle)
+	h.pl.Key("ok")
+	playerPrefs := h.fm.lastText()
+	for _, want := range []string{"Seek Steps", "Stop When Idle", "Log Level", "Redact Tokens"} {
+		if !strings.Contains(playerPrefs, want) {
+			t.Errorf("player preferences missing %q:\n%s", want, playerPrefs)
+		}
+	}
+
+	// Seek steps: horizontal then vertical.
+	moveTo(h.pl, h.fm, "Seek Steps")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "← / →")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "15 s")
+	h.pl.Key("ok")
+	o := h.pl.Options()
+	if o.SeekLeft != -15 || o.SeekRight != 15 {
+		t.Errorf("horizontal seek steps = %v/%v, want -15/15", o.SeekLeft, o.SeekRight)
+	}
+	// The label reflects it.
+	if v := h.fm.lastText(); !strings.Contains(v, "Seek Steps: 15 s / 60 s") {
+		t.Errorf("player preferences row not updated:\n%s", v)
+	}
+}
+
+// Stop-when-idle and the log level are live-editable.
+func TestOSDIdleStopAndLogLevel(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetSaveFunc(func(Options) {})
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, playerPrefsTitle)
+	h.pl.Key("ok")
+
+	moveTo(h.pl, h.fm, "Stop When Idle")
+	h.pl.Key("ok") // the submenu lists off / 15m / 1h / 3h / 6h / 24h
+	moveTo(h.pl, h.fm, "6 hours")
+	h.pl.Key("ok")
+	o := h.pl.Options()
+	if !o.IdleStop || o.IdleStopAfter != 6*time.Hour {
+		t.Errorf("idle stop = %v after %v, want true/6h", o.IdleStop, o.IdleStopAfter)
+	}
+
+	moveTo(h.pl, h.fm, "Log Level")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "debug")
+	h.pl.Key("ok")
+	if got := h.pl.Options().LogLevel; got != "debug" {
+		t.Errorf("log level = %q, want debug", got)
+	}
+	// "off" in the submenu turns it off again.
+	moveTo(h.pl, h.fm, "Stop When Idle")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "off")
+	h.pl.Key("ok")
+	if h.pl.Options().IdleStop {
+		t.Error("Stop When Idle could not be switched off")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -525,4 +526,52 @@ func cfgModTime(t *testing.T, path string) time.Time {
 		t.Fatal(err)
 	}
 	return fi.ModTime()
+}
+
+// The OSD-editable settings must survive the options → settings write-back, or
+// a change made in the menu would be lost on the next start.
+func TestOSDSettingsWriteBack(t *testing.T) {
+	s := DefaultSettings()
+	before := s
+
+	applyOptionsToSettings(&s, func() player.Options {
+		o := playerOptionsLocked(&before)
+		o.LocalKbps = 3000
+		o.AlwaysTranscode = true
+		o.TranscodeH265 = true
+		o.ForceH264 = true
+		o.IdleStop = false
+		o.IdleStopAfter = 6 * 60 * 60 * 1e9
+		o.LogLevel = "debug"
+		o.SanitizeOutput = false
+		o.SeekLeft, o.SeekRight = -15, 15
+		return o
+	}())
+
+	checks := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"local_kbps", s.LocalKbps, 3000},
+		{"always_transcode", s.AlwaysTranscode, true},
+		{"transcode_h265", s.TranscodeH265, true},
+		{"force_h264", s.ForceH264, true},
+		{"idle_stop", s.IdleStop, false},
+		{"idle_delay_s", s.IdleDelayS, 21600},
+		{"log_level", s.LogLevel, "debug"},
+		{"sanitize_output", s.SanitizeOutput, false},
+		{"seek_left", s.SeekLeft, -15.0},
+		{"seek_right", s.SeekRight, 15.0},
+	}
+	for _, c := range checks {
+		if fmt.Sprint(c.got) != fmt.Sprint(c.want) {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+	// And the media pipeline picks the new values up for the next play.
+	mc := mediaConfig(&s)
+	if mc.LocalKbps != 3000 || !mc.AlwaysTranscode || !mc.TranscodeH265 || !mc.ForceH264 {
+		t.Errorf("media config did not follow the OSD change: %+v", mc)
+	}
 }
