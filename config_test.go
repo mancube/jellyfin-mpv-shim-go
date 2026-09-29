@@ -91,3 +91,69 @@ func TestSettingsMigratesOldPlayerName(t *testing.T) {
 		t.Errorf("explicit name overwritten: %q", s2.PlayerName)
 	}
 }
+
+// Every new setting round-trips through config.json, and the runtime helpers
+// (Keys, SubPosition) behave as the player expects.
+func TestNewSettingsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	s := DefaultSettings()
+	s.SeekLeft, s.SeekRight = -15, 30
+	s.SeekHExact = true
+	s.KeyBindings = map[string]string{"c": "fullscreen", "x": "menu"}
+	s.SubtitleSize, s.SubtitleColor, s.SubtitlePosition = 125, "#FFEE00EE", "top"
+	s.AutoPlay, s.Fullscreen, s.EnableOSC = false, false, false
+	s.SkipIntroAlways = true
+	s.PathSubstitutions = map[string]string{"/data": "/mnt/nas"}
+	s.LanguageConfig = []LanguageRule{{AudioLang: "eng", Enabled: true, Priority: 5}}
+	s.TranscodeHDR = true
+	s.MediaEndedCmd = "notify-send done"
+	s.UpdateURL = "https://example/api"
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	var got Settings
+	if err := got.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if got.SeekLeft != -15 || got.SeekRight != 30 || !got.SeekHExact {
+		t.Errorf("seek settings lost: %+v", got)
+	}
+	if keys := got.Keys(); keys["c"] != "fullscreen" || keys["x"] != "menu" {
+		t.Errorf("key bindings lost: %v", keys)
+	}
+	if got.SubtitleSize != 125 || got.SubtitleColor != "#FFEE00EE" || got.SubPosition() != "top" {
+		t.Errorf("subtitle settings lost: %d %q %q", got.SubtitleSize, got.SubtitleColor, got.SubPosition())
+	}
+	if got.AutoPlay || got.Fullscreen || got.EnableOSC {
+		t.Error("explicitly disabled toggles came back on")
+	}
+	if !got.SkipIntroAlways || !got.TranscodeHDR {
+		t.Error("skip/transcode flags lost")
+	}
+	if got.PathSubstitutions["/data"] != "/mnt/nas" {
+		t.Errorf("path substitutions lost: %v", got.PathSubstitutions)
+	}
+	if len(got.LanguageConfig) != 1 || got.LanguageConfig[0].AudioLang != "eng" || got.LanguageConfig[0].Priority != 5 {
+		t.Errorf("language rules lost: %+v", got.LanguageConfig)
+	}
+	if got.MediaEndedCmd != "notify-send done" || got.UpdateURL != "https://example/api" {
+		t.Errorf("hooks lost: %q %q", got.MediaEndedCmd, got.UpdateURL)
+	}
+
+	// A config without the new keys still gets sensible defaults.
+	var fresh Settings
+	if err := fresh.Load(filepath.Join(dir, "missing.json")); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.SeekUp != 60 || fresh.SeekRight != 5 || fresh.PlaybackTimeoutS != 30 ||
+		fresh.SubtitleSize != 100 || !fresh.AutoPlay || !fresh.EnableOSC || !fresh.MenuMouse {
+		t.Errorf("defaults for the new settings = %+v", fresh)
+	}
+	if fresh.Keys() != nil {
+		t.Errorf("no key bindings should mean nil (use the defaults), got %v", fresh.Keys())
+	}
+	if fresh.SubPosition() != "bottom" {
+		t.Errorf("SubPosition default = %q", fresh.SubPosition())
+	}
+}

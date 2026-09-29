@@ -24,6 +24,10 @@ type Session struct {
 	LogPath   string
 	// OpenOSD opens the in-player OSD menu (the tray's "Player Menu" item).
 	OpenOSD func()
+	// UpdateNote is a one-line notice (e.g. a new release is available).
+	UpdateNote func() string
+	// OpenUpdatePage opens that release in the browser.
+	OpenUpdatePage func()
 	// Quit stops the whole app (the tray uses it too).
 	Quit func()
 
@@ -118,14 +122,15 @@ func (m statusModel) View() string {
 	if m.inSetup {
 		return m.setup.View()
 	}
-	return strings.Join([]string{
-		m.headerView(),
-		m.nowPlayingView(),
-		m.logView(),
-		"",
-		hints([2]string{"a", "accounts"}, [2]string{"p", "add account"}, [2]string{"q", "quit"}),
-		"",
-	}, "\n")
+	views := []string{m.headerView(), m.nowPlayingView()}
+	if m.s.UpdateNote != nil {
+		if note := m.s.UpdateNote(); note != "" {
+			views = append(views, styWarn.Render("▲ "+note))
+		}
+	}
+	views = append(views, m.logView(), "",
+		hints([2]string{"a", "accounts"}, [2]string{"p", "add account"}, [2]string{"q", "quit"}), "")
+	return strings.Join(views, "\n")
 }
 
 func (m statusModel) headerView() string {

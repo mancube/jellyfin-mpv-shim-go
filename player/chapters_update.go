@@ -208,6 +208,19 @@ func compareVersions(a, b string) int {
 	return 0
 }
 
+// OpenUpdatePage opens the release page in the browser (menu row, tray).
+func (p *Player) OpenUpdatePage() {
+	updateMu.Lock()
+	url := updateState.URL
+	updateMu.Unlock()
+	if url == "" {
+		return
+	}
+	if err := openURL(url); err != nil {
+		p.log.Printf("open update page: %v", err)
+	}
+}
+
 // openUpdatePage opens the release page in the browser (menu row).
 func (m *menu) openUpdatePage() {
 	updateMu.Lock()

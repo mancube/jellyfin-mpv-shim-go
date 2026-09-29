@@ -28,7 +28,8 @@ jellyfin-web / mobile app
 | **Casting** | Appears as a cast device in the Jellyfin UI; direct play (local file or `/Videos/{id}/stream`) and HLS transcode, with media-source fallback. Works with Jellyfin v11 and v12. |
 | **Remote control** | Play/pause, seek, next/previous, stop, volume, mute, audio & subtitle track switching, fullscreen, screenshot — from the web UI, the mobile apps, or mpv keybindings. |
 | **State sync** | Position, pause, mute, volume and track changes are reported to the server as they happen (mpv property observers), so the remote panel follows the player within ~1 s. |
-| **OSD menu** | `c` opens a menu drawn over the video (audio, subtitles, screenshot, quit) — driven by the keyboard, the mpv OSC or the remote's navigation buttons. |
+| **OSD menu** | `c` opens a menu drawn over the video (audio, subtitles, chapters, screenshot, preferences, quit) — driven by the keyboard, the mouse, the mpv OSC or the remote's navigation buttons. |
+| **Settings parity** | The ported upstream settings: key rebinding, seek steps, subtitle styling, auto-play/fullscreen/raise, idle and playback timeouts, device-profile codec knobs (HDR/Hi10p/Dolby Vision, forced codecs), direct paths with path substitutions, language rules and filters, and lifecycle shell hooks. |
 | **Queue** | PlayNext/PlayLast, auto-advance on end-of-file, mark watched/unwatched, intro & credits skipping. |
 | **Resilience** | WebSocket reconnect with exponential backoff and a `/Sessions` health check; mpv crash → respawn and resume at the last position; transcode teardown; bounded crash-restart loop; idle stop. |
 | **Setup & status** | Bubble Tea TUI: add accounts with a password or Quick Connect, watch connection state and live playback, tail the log. Desktop systray with the same menu as upstream. |
@@ -120,6 +121,11 @@ terminal.
 | `w` | mark watched + next | `u` | stop + mark unwatched |
 | `s` | screenshot | | |
 
+The OSD menu also has **Video Preferences** and **Player Preferences**
+sub-menus (transcode quality, subtitle size/colour/position, HDR/Hi10p/DVR
+toggles, auto-play, fullscreen, OSC, intro skipping …). Changes apply
+immediately and are written back to `config.json`.
+
 ### Tray menu
 
 Status and now-playing lines, **Configure Servers…** (the TUI wizard),
@@ -149,6 +155,40 @@ dot: green connected, amber reconnecting, grey offline.
 | `log_level` | `info` | mpv `--msg-level` (quiet/error/warn/info/debug) |
 | `write_log` | false | also append to `<config dir>/mpv-shim.log` |
 | `media_keys` | true | let mpv handle media keys |
+| `key_bindings` | upstream defaults | `{"<mpv key>": "<action>"}`; `""` unbinds a key |
+| `seek_up` / `seek_down` | 60 / -60 | arrow-key seek steps (seconds) |
+| `seek_left` / `seek_right` | -5 / 5 | horizontal seek steps |
+| `seek_h_exact` / `seek_v_exact` | false | keyframe-exact seeks |
+| `use_web_seek` | false | use the remote's own skip lengths when the server sends them |
+| `media_key_seek` | false | media keys seek instead of skipping episodes |
+| `auto_play` | true | advance to the next queue item when one finishes |
+| `fullscreen` | true | start playback fullscreen |
+| `raise_mpv` | true | raise the mpv window when a new item starts |
+| `enable_osc` | true | keep mpv's on-screen controller (the menu hides it while open) |
+| `force_set_played` | false | mark watched even when auto_play is off |
+| `playback_timeout` | 30 | seconds to wait for the media to start |
+| `subtitle_size` | 100 | subtitle scale, percent |
+| `subtitle_color` | `#FFFFFFFF` | subtitle colour (mpv colour syntax) |
+| `subtitle_position` | bottom | `bottom` / `top` / `middle` |
+| `always` intro skipping | `skip_intro_always` false | skip as soon as the segment starts |
+| `skip_intro` / `skip_credits` | true | *ask* to skip near the end of the segment |
+| `menu_mouse` | true | click/hover the OSD menu with the mouse |
+| `screenshot_dir` | `<config>/screenshots` | where `s` and TakeScreenshot write |
+| `direct_paths` | false | serve a local file for a remote server |
+| `path_substitutions` | — | `{"<server path prefix>": "<local prefix>"}` |
+| `lang_filter_audio` / `lang_filter_sub` | — | comma list of allowed languages ("und,eng,jpn") |
+| `language_config` | — | ordered auto-track rules (`{audio_lang, sub_lang, enabled, priority}`) |
+| `always_transcode` | false | disable Direct Play entirely |
+| `transcode_hi10p` | false | transcode 10-bit video down to 8-bit |
+| `transcode_hdr` | false | transcode HDR down to SDR |
+| `transcode_dolby_vision` | true | transcode Dolby Vision down |
+| `force_video_codec` / `force_audio_codec` | — | restrict the transcoding profile to these codecs |
+| `health_check_interval` | 300 | seconds between `/Sessions` health checks (0 disables) |
+| `connect_retry_mins` | 0 | give up reconnecting after N minutes (0 = forever) |
+| `sanitize_output` | true | redact tokens/api keys from the log |
+| `check_updates` / `notify_updates` | true | poll `update_url` for a newer release |
+| `update_url` | GitHub releases API | endpoint returning `{"tag_name","html_url"}` |
+| `play_cmd`, `pre_media_cmd`, `stop_cmd`, `media_ended_cmd`, `idle_cmd`, `idle_ended_cmd` | — | shell hooks run at those points in the playback lifecycle |
 
 Config and credentials live in `~/.config/mpv-shim/`, `%appdata%\mpv-shim\` or
 `~/Library/Application Support/mpv-shim/`. `cred.json` is mode 0600 and holds

@@ -280,6 +280,28 @@ func playerOptions(s *Settings) player.Options {
 	return o
 }
 
+// applyOptionsToSettings copies the player's runtime options back into the
+// config, so a change made in the OSD preference menus survives a restart.
+func applyOptionsToSettings(s *Settings, pl *player.Player) {
+	o := pl.Options()
+	s.SeekUp, s.SeekDown, s.SeekLeft, s.SeekRight = o.SeekUp, o.SeekDown, o.SeekLeft, o.SeekRight
+	s.SeekHExact, s.SeekVExact, s.UseWebSeek = o.SeekHExact, o.SeekVExact, o.UseWebSeek
+	s.MediaKeySeek = o.MediaKeySeek
+	s.SubtitleSize, s.SubtitleColor, s.SubtitlePosition = o.SubSize, o.SubColor, o.SubPosition
+	s.AutoPlay, s.Fullscreen, s.RaiseMPV, s.EnableOSC = o.AutoPlay, o.Fullscreen, o.RaiseMPV, o.EnableOSC
+	s.ForceSetPlayed = o.ForceSetPlayed
+	s.SkipIntro, s.SkipIntroAlways = o.SkipIntro, o.SkipIntroAlways
+	s.SkipCredits, s.SkipCreditsAlways = o.SkipCredits, o.SkipCreditsAlways
+	s.MenuMouse, s.WriteLog, s.CheckUpdates = o.MenuMouse, o.WriteLogs, o.CheckUpdates
+	s.TranscodeHi10p, s.TranscodeHDR = o.TranscodeHi10p, o.TranscodeHDR
+	s.TranscodeDolbyVision = o.TranscodeDolbyVision
+	s.DirectPaths = o.DirectPaths
+	s.RemoteKbps = o.RemoteKbps
+	if len(o.Keys) > 0 {
+		s.KeyBindings = o.Keys
+	}
+}
+
 func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, configDir, cfgPath string) (*session, error) {
 	client := jfin.New(a.Server, s.PlayerName, a.DeviceID, version, s.IgnoreSSL)
 	client.Token, client.UserID = a.AccessToken, a.UserID
@@ -302,10 +324,18 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	pl := player.New(proc, lg)
 	pl.SetOptions(playerOptions(s))
 	pl.SetVersion(version)
-	pl.SetUpdateURL(s.UpdateURL)
+	updateURL := s.UpdateURL
+	if updateURL == "" && s.CheckUpdates {
+		// Upstream checks GitHub releases; point update_url at your own
+		// release feed to change that.
+		updateURL = "https://api.github.com/repos/jellyfin/jellyfin-mpv-shim/releases/latest"
+	}
+	pl.SetUpdateURL(updateURL)
 	pl.SetUpdateEnabled(s.CheckUpdates)
 	pl.SetSaveFunc(func() {
-		// The OSD preference menus change settings at runtime; write them back.
+		// The OSD preference menus change settings at runtime: copy the
+		// player's options back into the config, then persist.
+		applyOptionsToSettings(s, pl)
 		if err := s.Save(cfgPath); err != nil {
 			lg.Printf("saving config: %v", err)
 		}
@@ -325,6 +355,7 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	if s.HealthCheckS > 0 {
 		ws.HealthInterval = time.Duration(s.HealthCheckS) * time.Second
 	}
+	ws.RetryMins = s.ConnectRetryMins
 	ws.On("Play", func(ctx context.Context, data json.RawMessage) {
 		go handlePlay(ctx, client, pl, mcfg, data) // don't block the WS read loop
 	})
@@ -444,6 +475,13 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 			lg.Printf("tray: open OSD menu: %v", err)
 		}
 	}
+	uiSess.UpdateNote = func() string {
+		if sess.pl.HasUpdate() {
+			return "mpv-shim " + sess.pl.UpdateVersion() + " is available"
+		}
+		return ""
+	}
+	uiSess.OpenUpdatePage = sess.pl.OpenUpdatePage
 	uiSess.Quit = func() { quitOnce.Do(func() { stop() }) }
 	uiSess.SetLogf(lg.Printf)
 	if ok := ui.RunTray(uiSess); !ok {

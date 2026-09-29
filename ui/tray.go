@@ -59,6 +59,14 @@ func RunTray(s *Session) bool {
 		}
 
 		systray.AddSeparator()
+		if s.UpdateNote != nil {
+			if note := s.UpdateNote(); note != "" {
+				update := systray.AddMenuItem(note, "Open the release page")
+				update.Click(s.OpenUpdatePage)
+				systray.AddSeparator()
+			}
+		}
+
 		quit := systray.AddMenuItem("Quit", "Stop mpv-shim")
 		quit.Click(func() {
 			if s.Quit != nil {
@@ -101,6 +109,11 @@ func refreshTray(s *Session, status, nowPlaying *systray.MenuItem) {
 			setTrayIcon(state)
 		}
 		text := "mpv-shim — " + connLabel(state)
+		if s.UpdateNote != nil {
+			if note := s.UpdateNote(); note != "" {
+				text = note
+			}
+		}
 		status.SetTitle("Status: " + text)
 		systray.SetTooltip(text)
 
