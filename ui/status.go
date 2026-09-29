@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"mpv-shim/jfin"
 	"mpv-shim/player"
@@ -44,10 +45,10 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.s.Quit()
 			}
 			return m, tea.Quit
-		case "a", "r", "i":
-			m.inSetup = true
+		case "a", "r", "i", "p":
 			sm := newSetupModel(m.deps)
 			m.setup = &sm
+			m.inSetup = true
 			return m, m.setup.Init()
 		}
 	case tickMsg:
@@ -60,38 +61,77 @@ func (m statusModel) View() string {
 	if m.inSetup {
 		return m.setup.View()
 	}
-	st := m.s.Player.Status()
-	conn := "disconnected"
-	if m.s.WS.Connected() {
-		conn = "connected"
-	}
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("mpv-shim — %s  (%s)\n", m.s.Account.Server, m.s.Account.Username))
-	b.WriteString(fmt.Sprintf("server: %s\n\n", conn))
-	if st.Playing {
-		state := "playing"
-		if st.Paused {
-			state = "paused"
-		}
-		b.WriteString(fmt.Sprintf("now playing: %s\n", st.Title))
-		b.WriteString(fmt.Sprintf("  %s / %s  (%s)  vol %.0f%%%s\n\n",
-			fmtTime(st.Position), fmtTime(st.Duration), state, st.Volume, muteMark(st.Mute)))
-	} else {
-		b.WriteString("now playing: —\n\n")
-	}
-	b.WriteString("log\n")
-	for _, l := range m.s.Logs.Tail(12) {
-		b.WriteString("  " + l + "\n")
-	}
-	b.WriteString("\naccounts: a add   i quick connect   r remove   q quit\n")
-	return b.String()
+	return strings.Join([]string{
+		m.headerView(),
+		m.nowPlayingView(),
+		m.logView(),
+		"",
+		hints([2]string{"a", "accounts"}, [2]string{"p", "add account"}, [2]string{"q", "quit"}),
+		"",
+	}, "\n")
 }
 
-func muteMark(mute bool) string {
-	if mute {
-		return "  [muted]"
+func (m statusModel) headerView() string {
+	conn := styBad.Render("● offline")
+	if m.s.WS.Connected() {
+		conn = styOK.Render("● online")
 	}
-	return ""
+	line := conn + styDim.Render("   "+clip(m.s.Account.Server, 44)) +
+		styDim.Render("  ·  ") + clip(m.s.Account.Username, 20)
+	right := styDim.Render(clip(m.s.Account.DeviceID, 8))
+	gap := 58 - lipgloss.Width(line) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return panel("mpv-shim", line+strings.Repeat(" ", gap)+right)
+}
+
+func (m statusModel) nowPlayingView() string { return nowPlaying(m.s.Player.Status()) }
+
+// nowPlaying renders the playback panel for a status snapshot.
+func nowPlaying(st player.Status) string {
+	if !st.Playing && st.Title == "" {
+		return panelW("now playing", 60, styDim.Render("nothing playing — cast something from the web UI"))
+	}
+	state := styOK.Render("▶ playing")
+	if st.Paused {
+		state = styWarn.Render("❚❚ paused")
+	}
+	vol := fmt.Sprintf("vol %.0f%%", st.Volume)
+	if st.Mute {
+		vol += "  " + styBad.Render("muted")
+	}
+	title := styText.Render(clip(st.Title, 44))
+	volStyle := styDim.Render(vol)
+	gap := 58 - lipgloss.Width(title) - lipgloss.Width(volStyle)
+	if gap < 1 {
+		gap = 1
+	}
+	return panelW("now playing", 60,
+		title+strings.Repeat(" ", gap)+volStyle,
+		"",
+		state+"  "+bar(frac(st.Position, st.Duration), 26),
+		styDim.Render(fmtTime(st.Position)+" / "+fmtTime(st.Duration)),
+	)
+}
+
+func (m statusModel) logView() string {
+	lines := m.s.Logs.Tail(10)
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		out = append(out, styDim.Render("│ ")+styText.Render(clip(l, 58)))
+	}
+	return styTitle.Render("log") + "\n" + strings.Join(out, "\n")
+}
+
+func frac(pos, dur float64) float64 {
+	if dur <= 0 {
+		return 0
+	}
+	return pos / dur
 }
 
 func fmtTime(sec float64) string {
@@ -110,12 +150,12 @@ func fmtTime(sec float64) string {
 
 // RunSetup runs the account wizard and returns when the user quits it.
 func RunSetup(d Deps) error {
-	_, err := tea.NewProgram(newSetupModel(d)).Run()
+	_, err := tea.NewProgram(newSetupModel(d), tea.WithAltScreen()).Run()
 	return err
 }
 
 // RunStatus runs the live status screen (blocking).
 func RunStatus(s *Session, d Deps) error {
-	_, err := tea.NewProgram(newStatusModel(s, d)).Run()
+	_, err := tea.NewProgram(newStatusModel(s, d), tea.WithAltScreen()).Run()
 	return err
 }

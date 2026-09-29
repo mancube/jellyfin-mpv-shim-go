@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"mpv-shim/jfin"
+	"mpv-shim/player"
 )
 
 func TestLogRingWrapsAndTails(t *testing.T) {
@@ -187,4 +188,49 @@ func TestSetupPasswordLoginStoresAccount(t *testing.T) {
 	if _, err := os.Stat(credPath); err != nil {
 		t.Errorf("credentials not written: %v", err)
 	}
+}
+
+// The status panels are pure functions of a snapshot: check they say
+// something useful instead of dumping fields.
+func TestNowPlayingPanel(t *testing.T) {
+	idle := nowPlaying(player.Status{})
+	if !strings.Contains(stripANSI(idle), "nothing playing") {
+		t.Errorf("idle panel = %q", stripANSI(idle))
+	}
+	st := player.Status{
+		Title: "2 Fast 2 Furious (2003)", Position: 645, Duration: 6455,
+		Playing: true, Volume: 75,
+	}
+	got := stripANSI(nowPlaying(st))
+	for _, want := range []string{"2 Fast 2 Furious", "10:45 / 1:47:35", "█", "vol 75%"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("panel missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "muted") {
+		t.Errorf("unmuted playback shows 'muted':\n%s", got)
+	}
+	st.Paused, st.Mute = true, true
+	got = stripANSI(nowPlaying(st))
+	if !strings.Contains(got, "paused") || !strings.Contains(got, "muted") {
+		t.Errorf("paused/muted state not shown:\n%s", got)
+	}
+}
+
+func stripANSI(s string) string {
+	var out strings.Builder
+	inEsc := false
+	for _, r := range s {
+		switch {
+		case inEsc:
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEsc = false
+			}
+		case r == 0x1b:
+			inEsc = true
+		default:
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
 }

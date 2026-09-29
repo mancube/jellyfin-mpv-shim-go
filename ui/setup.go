@@ -265,46 +265,79 @@ func (m setupModel) View() string {
 	var b strings.Builder
 	switch m.scr {
 	case screenList:
-		b.WriteString("Accounts\n\n")
-		if len(m.deps.Creds.Accounts) == 0 {
-			b.WriteString("  (none yet)\n\n")
-		}
-		for i, a := range m.deps.Creds.Accounts {
-			marker := " "
-			if i == m.deps.Creds.Active {
-				marker = "*"
-			}
-			cursor := "  "
-			if i == m.sel {
-				cursor = "> "
-			}
-			b.WriteString(fmt.Sprintf("%s%s%d: %s  %s\n", cursor, marker, i, a.Server, a.Username))
-		}
-		b.WriteString("\np add with password   i add with Quick Connect   r remove   q quit\n")
+		b.WriteString(panelW("accounts", 56, m.accountRows()...))
+		b.WriteString("\n")
+		b.WriteString(hints(
+			[2]string{"p", "add with password"},
+			[2]string{"i", "add with Quick Connect"},
+			[2]string{"r", "remove"},
+			[2]string{"q", "quit"},
+		))
 	case screenAddPassword:
 		labels := []string{"Server", "Username", "Password"}
+		rows := make([]string, 0, len(m.inputs))
 		for i, ti := range m.inputs {
-			marker := "  "
+			label := styDim.Render(pad(labels[i], 10))
 			if i == m.focus {
-				marker = "> "
+				label = styTitle.Render(pad(labels[i], 10))
 			}
-			b.WriteString(fmt.Sprintf("%s%s: %s\n", marker, labels[i], ti.View()))
+			rows = append(rows, label+ti.View())
 		}
-		b.WriteString("\ntab/enter next   shift+tab back   esc back\n")
+		b.WriteString(panelW("add account", 52, rows...))
+		b.WriteString("\n")
+		b.WriteString(hints([2]string{"enter", "next / log in"}, [2]string{"shift+tab", "back"}, [2]string{"esc", "cancel"}))
 	case screenAddQuickConnect:
-		b.WriteString(fmt.Sprintf("Server: %s\n", m.inputs[0].View()))
-		b.WriteString("\nenter start Quick Connect   esc back\n")
+		b.WriteString(panelW("add account · quick connect", 52,
+			styDim.Render(pad("Server", 10))+m.inputs[0].View(),
+			"",
+			styDim.Render("The server shows a code; enter it in the web UI to authorize."),
+		))
+		b.WriteString("\n")
+		b.WriteString(hints([2]string{"enter", "start"}, [2]string{"esc", "back"}))
 	case screenQuickCode:
-		b.WriteString("Quick Connect\n\n")
+		body := []string{}
 		if m.qc != nil {
-			b.WriteString(fmt.Sprintf("  Enter code %s at %s in your browser, then authorize.\n", m.qc.Code, m.qcServer()))
+			body = append(body,
+				kv("Code", styOK.Render(m.qc.Code)),
+				kv("Server", m.qcServer()),
+				"",
+				styDim.Render("Open the web UI, then Quick Connect → enter the code above."),
+			)
 		}
-		b.WriteString(fmt.Sprintf("\nwaiting %ds…   esc cancel\n", m.qcWait))
+		body = append(body, "", styDim.Render(fmt.Sprintf("waiting %ds…", m.qcWait)))
+		b.WriteString(panelW("quick connect", 52, body...))
+		b.WriteString("\n")
+		b.WriteString(hints([2]string{"esc", "cancel"}))
 	}
 	if m.err != "" {
-		b.WriteString("\n" + m.err + "\n")
+		b.WriteString("\n" + styBad.Render("✖ "+m.err) + "\n")
 	}
 	return b.String()
+}
+
+// accountRows renders the account list, one line each.
+func (m setupModel) accountRows() []string {
+	accts := m.deps.Creds.Accounts
+	if len(accts) == 0 {
+		return []string{styDim.Render("no accounts yet — add one below")}
+	}
+	rows := make([]string, 0, len(accts))
+	for i, a := range accts {
+		active := ""
+		if i == m.deps.Creds.Active {
+			active = styOK.Render(" ← active")
+		}
+		cursor := "  "
+		if i == m.sel {
+			cursor = styTitle.Render("▸ ")
+		}
+		name := a.Username
+		if a.User != "" && a.User != a.Username {
+			name = a.Username + styDim.Render(" ("+a.User+")")
+		}
+		rows = append(rows, cursor+pad(clip(a.Server, 40), 41)+name+active)
+	}
+	return rows
 }
 
 // quickResult applies the async Quick Connect exchange result.
