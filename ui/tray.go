@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/energye/systray"
+
+	"mpv-shim/jfin"
 )
 
 // RunTray starts the desktop tray. It never blocks the caller (systray owns
@@ -20,7 +22,7 @@ import (
 func RunTray(s *Session) bool {
 	ready := make(chan struct{})
 	go systray.Run(func() {
-		if icon := trayIcon(false); icon != nil {
+		if icon := trayIcon(jfin.StateOffline); icon != nil {
 			systray.SetIcon(icon)
 		}
 		systray.SetTitle("mpv-shim")
@@ -76,21 +78,29 @@ func RunTray(s *Session) bool {
 	}
 }
 
+// connLabel is the human name of a connection state.
+func connLabel(state int32) string {
+	switch state {
+	case jfin.StateConnected:
+		return "online"
+	case jfin.StateReconnecting:
+		return "reconnecting"
+	default:
+		return "offline"
+	}
+}
+
 func refreshTray(s *Session, status, nowPlaying *systray.MenuItem) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
-	wasOnline := true
+	lastState := int32(-1) // force the first swap
 	for range t.C {
-		online := s.WS.Connected()
-		conn := "offline"
-		if online {
-			conn = "online"
+		state := s.WS.State()
+		if state != lastState {
+			lastState = state
+			setTrayIcon(state)
 		}
-		if online != wasOnline {
-			wasOnline = online
-			setTrayIcon(online)
-		}
-		text := "mpv-shim — " + conn
+		text := "mpv-shim — " + connLabel(state)
 		status.SetTitle("Status: " + text)
 		systray.SetTooltip(text)
 
@@ -128,8 +138,8 @@ func openInFileManager(path string) {
 }
 
 // setTrayIcon swaps the tray icon (the status dot changes with the socket).
-func setTrayIcon(online bool) {
-	if icon := trayIcon(online); icon != nil {
+func setTrayIcon(state int32) {
+	if icon := trayIcon(state); icon != nil {
 		systray.SetIcon(icon)
 	}
 }

@@ -222,3 +222,54 @@ func TestWSIgnoresUnactedMessagesQuietly(t *testing.T) {
 		t.Errorf("keepalive summaries = %d, want 2:\n%s", got, out)
 	}
 }
+
+// The tray's status dot needs a three-way state: offline (not trying),
+// reconnecting (dialing/backing off) and connected.
+func TestWSConnectionState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Sessions/Capabilities/Full", "/Sessions":
+			_, _ = w.Write([]byte(`[]`))
+		case "/socket":
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close(websocket.StatusNormalClosure, "")
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "d", "dev-1", "1", false)
+	ws := NewWS(c, discardLog())
+	ws.HealthInterval = time.Hour
+	if got := ws.State(); got != StateOffline {
+		t.Errorf("initial state = %d, want StateOffline", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = ws.Run(ctx); close(done) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for ws.State() != StateConnected {
+		if time.Now().After(deadline) {
+			t.Fatalf("never reached StateConnected (state=%d)", ws.State())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ws.Connected() {
+		t.Error("StateConnected but Connected() is false")
+	}
+	cancel()
+	<-done
+	if got := ws.State(); got != StateOffline {
+		t.Errorf("state after shutdown = %d, want StateOffline", got)
+	}
+	if ws.Connected() {
+		t.Error("Connected() still true after shutdown")
+	}
+}

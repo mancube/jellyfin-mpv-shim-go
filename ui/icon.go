@@ -1,9 +1,9 @@
 package ui
 
-// The tray icon: upstream's jellyfin-mpv-shim `systray.png` (16×16), tinted
-// into the shim's own colours and given a live status dot, so the icon says
-// "connected" at a glance. Windows gets a generated .ico (one PNG-compressed
-// entry, which Windows has supported since Vista); Linux/macOS get the PNG.
+// The tray icon: upstream's jellyfin-mpv-shim `systray.png` (16×16) used
+// as-is, plus a small status dot in the bottom-right corner so the icon says
+// whether we are connected. Windows gets a generated .ico (one PNG-compressed
+// entry, supported since Vista); Linux/macOS get the PNG.
 
 import (
 	"bytes"
@@ -14,29 +14,30 @@ import (
 	"image/draw"
 	"image/png"
 	"runtime"
+
+	"mpv-shim/jfin"
 )
 
 //go:embed assets/systray.png
 var upstreamIcon []byte
 
-// The shim's two-tone palette: the ring in Jellyfin's cyan, the mark inside
-// lighter so the 16 px glyph keeps its detail.
+// Status dot colours, one per connection state.
 var (
-	iconRing  = color.NRGBA{R: 0x00, G: 0xa4, B: 0xdc, A: 0xff}
-	iconMark  = color.NRGBA{R: 0xc8, G: 0xec, B: 0xff, A: 0xff}
-	dotOnline = color.NRGBA{R: 0x2e, G: 0xd4, B: 0x5a, A: 0xff}
-	dotAway   = color.NRGBA{R: 0x8a, G: 0x8a, B: 0x8a, A: 0xff}
+	dotConnected    = color.NRGBA{R: 0x2e, G: 0xd4, B: 0x5a, A: 0xff} // green
+	dotReconnecting = color.NRGBA{R: 0xf2, G: 0xc0, B: 0x3d, A: 0xff} // amber
+	dotOffline      = color.NRGBA{R: 0x8a, G: 0x8a, B: 0x8a, A: 0xff} // grey
 )
 
-// trayIcon renders the tray icon for the current connection state. Returns
+// trayIcon renders the tray icon for a connection state. Returns
 // platform-appropriate bytes (PNG, or an ICO on Windows).
-func trayIcon(online bool) []byte {
+func trayIcon(state int32) []byte {
 	src, err := png.Decode(bytes.NewReader(upstreamIcon))
 	if err != nil {
 		return nil
 	}
-	img := tintIcon(src)
-	drawStatusDot(img, online)
+	img := image.NewNRGBA(src.Bounds())
+	draw.Draw(img, src.Bounds(), src, src.Bounds().Min, draw.Src)
+	drawStatusDot(img, state)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		return nil
@@ -47,67 +48,15 @@ func trayIcon(online bool) []byte {
 	return buf.Bytes()
 }
 
-// tintIcon maps the upstream glyph's luminance onto our two colours: the
-// brighter half (the ring's top/outer pixels) becomes the mark colour, the
-// rest the ring colour — this keeps the shape while making it ours.
-func tintIcon(src image.Image) *image.NRGBA {
-	b := src.Bounds()
-	out := image.NewNRGBA(b)
-	draw.Draw(out, b, src, b.Min, draw.Src)
-	// Split the glyph's own luminance range rather than a fixed threshold: the
-	// upstream icon is a mid-tone purple, so an absolute cut would flatten it
-	// to a single colour.
-	lo, hi := 255, 0
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			if p := out.NRGBAAt(x, y); p.A > 32 {
-				lum := luminance(p)
-				if lum < lo {
-					lo = lum
-				}
-				if lum > hi {
-					hi = lum
-				}
-			}
-		}
-	}
-	cut := lo + 3*(hi-lo)/4
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			p := out.NRGBAAt(x, y)
-			if p.A == 0 {
-				continue
-			}
-			c := iconRing
-			if luminance(p) > cut {
-				c = iconMark
-			}
-			// Keep a hint of the original shading so the glyph stays legible.
-			p.R = mix(p.R, c.R)
-			p.G = mix(p.G, c.G)
-			p.B = mix(p.B, c.B)
-			out.SetNRGBA(x, y, p)
-		}
-	}
-	return out
-}
-
-// luminance is the usual 0-255 perceived brightness.
-func luminance(c color.NRGBA) int {
-	return (299*int(c.R) + 587*int(c.G) + 114*int(c.B)) / 1000
-}
-
-func mix(orig, tint uint8) uint8 {
-	// 75% tint, 25% original.
-	return uint8((int(orig)*25 + int(tint)*75) / 100)
-}
-
 // drawStatusDot puts a small dot in the bottom-right corner: green while the
-// socket is up, grey when it is not (reconnecting, server down).
-func drawStatusDot(img *image.NRGBA, online bool) {
-	c := dotAway
-	if online {
-		c = dotOnline
+// socket is up, amber while reconnecting, grey while offline.
+func drawStatusDot(img *image.NRGBA, state int32) {
+	c := dotOffline
+	switch state {
+	case jfin.StateConnected:
+		c = dotConnected
+	case jfin.StateReconnecting:
+		c = dotReconnecting
 	}
 	b := img.Bounds()
 	x0, y0 := b.Max.X-3, b.Max.Y-3 // 3×3 dot
@@ -123,7 +72,7 @@ func drawStatusDot(img *image.NRGBA, online bool) {
 }
 
 // pngToICO wraps a PNG in a single-entry ICO container (Vista+ supports
-// PNG-compressed entries), so Windows shows the same tinted icon + dot.
+// PNG-compressed entries), so Windows shows the same icon + dot.
 func pngToICO(pngData []byte) []byte {
 	const (
 		headerSize = 6

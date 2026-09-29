@@ -34,6 +34,7 @@ type WS struct {
 	ignMu    sync.Mutex     // guards ignored
 	ignored  map[string]int // per-type count of messages we do not act on
 	live     atomic.Bool    // true while a socket is up (for the TUI/tray)
+	state    atomic.Int32   // StateOffline / StateReconnecting / StateConnected
 
 	// HealthInterval is the /Sessions poll period (0 disables).
 	HealthInterval time.Duration
@@ -57,8 +58,19 @@ func (w *WS) On(msgType string, h WSHandler) {
 	w.handlers[msgType] = h
 }
 
+// Connection states, for the TUI and the tray's status dot.
+const (
+	StateOffline      int32 = 0 // not connected, not trying (before start / after stop)
+	StateReconnecting int32 = 1 // dialing or waiting out the backoff
+	StateConnected    int32 = 2 // socket is up
+)
+
 // Connected reports whether the socket is currently up.
 func (w *WS) Connected() bool { return w.live.Load() }
+
+// State is the connection state (StateOffline / StateReconnecting /
+// StateConnected). The tray renders it as the status dot.
+func (w *WS) State() int32 { return w.state.Load() }
 
 // Run blocks until ctx is canceled, reconnecting forever.
 func (w *WS) Run(ctx context.Context) error {
@@ -67,8 +79,10 @@ func (w *WS) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		w.state.Store(StateReconnecting)
 		ok, err := w.connect(ctx)
 		if ctx.Err() != nil {
+			w.state.Store(StateOffline)
 			return ctx.Err()
 		}
 		if !ok {
@@ -81,6 +95,7 @@ func (w *WS) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			t.Stop()
+			w.state.Store(StateOffline)
 			return ctx.Err()
 		case <-t.C:
 		}
@@ -104,7 +119,11 @@ func (w *WS) connect(ctx context.Context) (ok bool, err error) {
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	w.log.Printf("ws: connected to %s", url)
 	w.live.Store(true)
-	defer w.live.Store(false)
+	w.state.Store(StateConnected)
+	defer func() {
+		w.live.Store(false)
+		w.state.Store(StateOffline)
+	}()
 	if err := w.c.PostCapabilities(ctx); err != nil {
 		w.log.Printf("ws: capabilities: %v", err)
 	}

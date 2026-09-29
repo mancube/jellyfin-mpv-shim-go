@@ -130,8 +130,11 @@ func (m statusModel) View() string {
 
 func (m statusModel) headerView() string {
 	conn := styBad.Render("● offline")
-	if m.s.WS.Connected() {
+	switch m.s.WS.State() {
+	case jfin.StateConnected:
 		conn = styOK.Render("● online")
+	case jfin.StateReconnecting:
+		conn = styWarn.Render("● reconnecting")
 	}
 	line := conn + styDim.Render("   "+clip(m.s.Account.Server, 44)) +
 		styDim.Render("  ·  ") + clip(m.s.Account.Username, 20)
