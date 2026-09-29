@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/url"
 	"os"
 	"os/signal"
@@ -25,6 +26,10 @@ import (
 )
 
 var version = "0.1.0-dev" // overridden via -ldflags "-X main.version=..."
+
+// logRemoteCommands mirrors every remote command we receive; -debug turns it on.
+// First thing to reach for when "the remote did the wrong thing".
+var logRemoteCommands bool
 
 func main() {
 	os.Exit(run())
@@ -66,6 +71,7 @@ func run() int {
 	log.SetFlags(0)
 	if *debug {
 		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+		logRemoteCommands = true
 	}
 
 	cfgDir, err := ConfigDir()
@@ -476,31 +482,35 @@ var navigation = map[string]string{
 // volume, mute, track selection, fullscreen and menu navigation. Port of
 // upstream event_handler.general_command.
 func handleGeneralCommand(pl *player.Player, name string, args json.RawMessage) {
+	if logRemoteCommands {
+		log.Printf("remote: %s %s", name, string(args))
+	}
 	if action, ok := navigation[name]; ok {
 		pl.Key(action)
 		return
 	}
-	var a struct {
-		Volume *int `json:"Volume"`
-		Index  *int `json:"Index"`
-	}
-	_ = json.Unmarshal(args, &a)
 	switch name {
 	case "SetVolume":
-		if a.Volume != nil {
-			pl.SetVolume(*a.Volume)
+		if v, ok := volumeArg(args); ok {
+			pl.SetVolume(v)
+		} else {
+			log.Printf("general command: SetVolume without a usable Volume: %s", string(args))
 		}
 	case "Mute":
 		pl.SetMute(true)
 	case "Unmute":
 		pl.SetMute(false)
 	case "SetAudioStreamIndex":
-		if a.Index != nil {
-			pl.SetStreams(a.Index, nil)
+		if i, ok := indexArg(args); ok {
+			pl.SetStreams(&i, nil)
+		} else {
+			log.Printf("general command: SetAudioStreamIndex without an Index: %s", string(args))
 		}
 	case "SetSubtitleStreamIndex":
-		if a.Index != nil {
-			pl.SetStreams(nil, a.Index)
+		if i, ok := indexArg(args); ok {
+			pl.SetStreams(nil, &i)
+		} else {
+			log.Printf("general command: SetSubtitleStreamIndex without an Index: %s", string(args))
 		}
 	case "VolumeUp":
 		pl.StepVolume(5)
@@ -517,6 +527,52 @@ func handleGeneralCommand(pl *player.Player, name string, args json.RawMessage) 
 	default:
 		log.Printf("general command: unhandled %q", name)
 	}
+}
+
+// volumeArg reads the SetVolume argument. Clients differ: jellyfin-web sends an
+// int 0-100, others a 0-1 float or even a string. All mean "percent" except
+// the fraction form, which we scale. An unreadable value is logged, not
+// silently dropped.
+func volumeArg(args json.RawMessage) (int, bool) {
+	v, ok := numberArg(args, "Volume")
+	if !ok {
+		return 0, false
+	}
+	pct := v
+	if v > 0 && v < 1 { // 0-1 fraction
+		pct = v * 100
+	}
+	return int(math.Round(pct)), true
+}
+
+// indexArg reads a stream index (SetAudio/SubtitleStreamIndex).
+func indexArg(args json.RawMessage) (int, bool) {
+	v, ok := numberArg(args, "Index")
+	return int(v), ok
+}
+
+// numberArg pulls one numeric field out of a command's Arguments, accepting a
+// JSON number or a numeric string.
+func numberArg(args json.RawMessage, field string) (float64, bool) {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(args, &m) != nil {
+		return 0, false
+	}
+	raw, ok := m[field]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var f float64
+	if json.Unmarshal(raw, &f) == nil {
+		return f, true
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
 }
 
 // doSetup runs the TUI account wizard.

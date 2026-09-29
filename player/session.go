@@ -17,6 +17,10 @@ func (p *Player) timelineOptions(finished bool) *jfin.SessionInfo {
 			volume = f
 		}
 	}
+	// Remote controls have 0-100 sliders; mpv allows up to `volume-max` (130 by
+	// default) and an out-of-range level makes the UI's slider jump and fight
+	// back with its own values.
+	volume = min(max(volume, 0), 100)
 	mute := false
 	if x, err := p.mpv.GetProperty("mute"); err == nil {
 		mute, _ = x.(bool)

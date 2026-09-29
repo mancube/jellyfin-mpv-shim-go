@@ -239,3 +239,77 @@ func TestGeneralCommandExtras(t *testing.T) {
 	}
 	handleGeneralCommand(pl, "TakeScreenshot", json.RawMessage(`{}`))
 }
+
+// Remote clients differ in how they encode command arguments: jellyfin-web
+// sends ints, others fractions or strings. None of them may be dropped.
+func TestCommandArgumentParsing(t *testing.T) {
+	cases := []struct {
+		args string
+		want int
+		ok   bool
+	}{
+		{`{"Volume":40}`, 40, true},     // jellyfin-web
+		{`{"Volume":25.0}`, 25, true},   // float that is a whole number
+		{`{"Volume":0.63}`, 63, true},   // 0-1 fraction
+		{`{"Volume":"55"}`, 55, true},   // numeric string
+		{`{"Volume":0}`, 0, true},       // silence
+		{`{"Volume":-5}`, -5, true},     // clamped by Player.SetVolume
+		{`{"Volume":250}`, 250, true},   // clamped by Player.SetVolume
+		{`{"volume":40}`, 0, false},     // wrong key
+		{`{}`, 0, false},                // missing
+		{`{"Volume":"loud"}`, 0, false}, // garbage
+	}
+	for _, c := range cases {
+		got, ok := volumeArg(json.RawMessage(c.args))
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("volumeArg(%s) = %d,%v want %d,%v", c.args, got, ok, c.want, c.ok)
+		}
+	}
+
+	idx := []struct {
+		args string
+		want int
+		ok   bool
+	}{
+		{`{"Index":3}`, 3, true},
+		{`{"Index":"3"}`, 3, true},
+		{`{"Index":-1}`, -1, true},
+		{`{"Index":null}`, 0, false},
+		{`{}`, 0, false},
+	}
+	for _, c := range idx {
+		got, ok := indexArg(json.RawMessage(c.args))
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("indexArg(%s) = %d,%v want %d,%v", c.args, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+// A SetVolume with a fraction must still reach mpv as a percentage.
+func TestGeneralCommandSetVolumeFraction(t *testing.T) {
+	ts := playServer(t)
+	c := jfin.New(ts.URL, "test", "dev1", "1.0", false)
+	c.Token, c.UserID = "tok", "u"
+	mvp := newMinimalMvp()
+	pl := player.New(mvp, log.New(io.Discard, "", 0))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pl.Start(ctx)
+	handlePlay(ctx, c, pl, jfin.MediaConfig{LocalKbps: 10000, RemoteKbps: 25000}, playData(t, "PlayNow", "a"))
+
+	mvp.SetProperty("volume", 100.0)
+	mvp.SetProperty("mute", false)
+	handleGeneralCommand(pl, "SetVolume", json.RawMessage(`{"Volume":0.42}`))
+	if got := mvp.props["volume"]; got != 42.0 {
+		t.Errorf("fractional SetVolume → volume %v, want 42", got)
+	}
+	// Muting then moving the slider unmutes.
+	handleGeneralCommand(pl, "Mute", json.RawMessage(`{}`))
+	handleGeneralCommand(pl, "SetVolume", json.RawMessage(`{"Volume":70}`))
+	if mvp.props["mute"] != false {
+		t.Error("SetVolume did not unmute")
+	}
+	if got := mvp.props["volume"]; got != 70.0 {
+		t.Errorf("volume = %v, want 70", got)
+	}
+}

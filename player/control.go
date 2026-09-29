@@ -193,6 +193,10 @@ func (p *Player) seekLocked(pos float64, absolute bool) {
 
 // SetVolume sets the volume 0-100 (clamped). Upstream only writes when the
 // value changed: the server spams SetVolume.
+//
+// Setting a volume above zero is an explicit "I want to hear this", so it
+// also unmutes: otherwise the slider appears dead (mpv keeps the mute flag and
+// the remote shows "muted" no matter what the volume is).
 func (p *Player) SetVolume(pct int) {
 	if pct < 0 {
 		pct = 0
@@ -202,9 +206,23 @@ func (p *Player) SetVolume(pct int) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	changed := false
+	if pct > 0 { // volume intent un-mutes
+		if x, err := p.mpv.GetProperty("mute"); err == nil {
+			if m, ok := x.(bool); ok && m {
+				p.mpv.SetProperty("mute", false)
+				p.lastMute = false
+				changed = true
+			}
+		}
+	}
 	if x, err := p.mpv.GetProperty("volume"); err == nil {
 		if f, ok := x.(float64); ok && int(f) == pct {
-			return
+			if changed { // we only unmuted
+				p.touchLocked()
+				p.sendProgressLocked()
+			}
+			return // unchanged: no report (the server spams SetVolume)
 		}
 	}
 	p.mpv.SetProperty("volume", pct)

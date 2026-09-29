@@ -1198,3 +1198,42 @@ func TestMenuLabelsUseDisplayTitle(t *testing.T) {
 		}
 	}
 }
+
+// A volume change from the remote must actually change the volume and never
+// leave the player muted (the "slider does nothing, it just mutes" symptom).
+func TestSetVolumeUnmutesAndChangesVolume(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.fm.SetProperty("volume", 100.0)
+	h.fm.SetProperty("mute", false)
+
+	// Muted first, then move the slider: the player must become audible.
+	h.pl.SetMute(true)
+	h.pl.SetVolume(60)
+	if h.fm.prop("mute") != false {
+		t.Error("SetVolume did not unmute")
+	}
+	if got := h.pl.GetVolume(); got != 60 {
+		t.Errorf("volume = %d, want 60", got)
+	}
+
+	// Volume 0 keeps the mute state (that is an explicit "silence" request).
+	h.pl.SetMute(true)
+	h.pl.SetVolume(0)
+	if h.fm.prop("mute") != true {
+		t.Error("SetVolume(0) unmuted the player")
+	}
+}
+
+// The reported level must stay inside the 0-100 range the remote sliders use,
+// even when mpv allows more.
+func TestReportedVolumeIsClamped(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.fm.SetProperty("volume", 130.0) // mpv's default volume-max
+	h.pl.Tick()
+	_, pr, _, _ := h.recs.snapshot()
+	if got := pr[len(pr)-1].VolumeLevel; got != 100 {
+		t.Errorf("reported VolumeLevel = %d, want 100 (clamped)", got)
+	}
+}
