@@ -98,7 +98,30 @@ func waitAccounts(s *Session) tea.Cmd {
 
 func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case backMsg:
+		return m.closeSetup()
 	case tea.KeyMsg:
+		// While the account wizard is open it owns the keyboard, except for
+		// the two keys that belong to the host: esc = back, ctrl+c = quit.
+		if m.inSetup {
+			switch msg.String() {
+			case "ctrl+c":
+				if m.s.Quit != nil {
+					m.s.Quit()
+				}
+				return m, tea.Quit
+			case "esc":
+				return m.closeSetup()
+			}
+			if m.setup != nil {
+				next, cmd := m.setup.Update(msg)
+				if sm, ok := next.(setupModel); ok {
+					m.setup = &sm
+				}
+				return m, cmd
+			}
+			return m.closeSetup()
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			if m.s.Quit != nil {
@@ -127,14 +150,24 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // openSetup switches to the account wizard (keys or tray) and keeps watching
-// for further tray clicks.
+// for further tray clicks. The wizard is embedded: its "q"/"esc" come back here
+// instead of quitting the app.
 func (m statusModel) openSetup() (tea.Model, tea.Cmd) {
 	if m.setup == nil {
 		sm := newSetupModel(m.deps)
 		m.setup = &sm
 	}
+	m.setup.embedded = true
+	m.setup.onBack = func() tea.Cmd { return func() tea.Msg { return backMsg{} } }
 	m.inSetup = true
 	return m, tea.Batch(m.setup.Init(), waitAccounts(m.s))
+}
+
+// closeSetup returns from the wizard to the status screen.
+func (m statusModel) closeSetup() (tea.Model, tea.Cmd) {
+	m.inSetup = false
+	m.setup = nil
+	return m, nil
 }
 
 func (m statusModel) View() string {

@@ -309,7 +309,6 @@ func TestStatusReconnectKey(t *testing.T) {
 	m := newStatusModel(s, Deps{Creds: testCreds()})
 
 	// Online: r opens the accounts list, it does not reconnect.
-	m.inSetup = true // pretend the wizard is open so we can see it switch
 	next, _ := m.Update(keyMsg("r"))
 	m = next.(statusModel)
 	if reconnects != 0 {
@@ -356,4 +355,65 @@ func TestTrayQuitStopsSessionAndUI(t *testing.T) {
 	if !sessionStopped || !uiQuit {
 		t.Errorf("Quit: session=%v uiQuit=%v", sessionStopped, uiQuit)
 	}
+}
+
+// Inside the status screen the account wizard is embedded: it takes the
+// keyboard, esc returns to the status screen, ctrl+c quits the app.
+func TestEmbeddedWizardNavigation(t *testing.T) {
+	s := NewSession(jfin.Account{Server: "http://x"}, nil, nil, NewLogRing(4))
+	var quits int
+	s.Quit = func() { quits++ }
+	m := newStatusModel(s, Deps{Creds: testCreds(), CredPath: filepath.Join(t.TempDir(), "cred.json")})
+
+	// a opens the wizard.
+	next, _ := m.Update(keyMsg("a"))
+	m = next.(statusModel)
+	if !m.inSetup {
+		t.Fatal("a did not open the accounts view")
+	}
+	if !strings.Contains(stripANSI(m.setup.View()), "back") {
+		t.Errorf("embedded wizard has no way back in its hints:\n%s", stripANSI(m.setup.View()))
+	}
+
+	// Typing inside the wizard reaches the wizard (e.g. "p" opens the form).
+	next, _ = m.Update(keyMsg("p"))
+	m = next.(statusModel)
+	if !strings.Contains(stripANSI(m.setup.View()), "Password") {
+		t.Errorf("key not delegated to the wizard:\n%s", stripANSI(m.setup.View()))
+	}
+
+	// esc goes back to the status screen instead of quitting.
+	next, _ = m.Update(escMsg())
+	m = next.(statusModel)
+	if m.inSetup {
+		t.Error("esc did not leave the accounts view")
+	}
+	if quits != 0 {
+		t.Error("esc quit the app")
+	}
+	if m.setup != nil {
+		t.Error("the wizard model was kept around after going back")
+	}
+
+	// ctrl+c inside the wizard quits the app.
+	next, _ = m.Update(keyMsg("a"))
+	m = next.(statusModel)
+	next, _ = m.Update(ctrlCMsg())
+	m = next.(statusModel)
+	if quits != 1 {
+		t.Errorf("ctrl+c did not quit the app (quits=%d)", quits)
+	}
+}
+
+func escMsg() tea.KeyMsg   { return tea.KeyMsg{Type: tea.KeyEsc} }
+func ctrlCMsg() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyCtrlC} }
+
+// The standalone wizard (mpv-shim setup) still quits with q.
+func TestStandaloneWizardQuitsWithQ(t *testing.T) {
+	m := newSetupModel(Deps{Creds: testCreds(), CredPath: filepath.Join(t.TempDir(), "cred.json")})
+	next, cmd := m.Update(keyMsg("q"))
+	if cmd == nil {
+		t.Error("q in the standalone wizard does not quit")
+	}
+	_ = next
 }

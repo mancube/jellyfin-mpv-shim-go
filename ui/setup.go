@@ -43,7 +43,16 @@ type setupModel struct {
 
 	qc     *jfin.QuickConnect
 	qcWait int // seconds elapsed waiting for the exchange
+
+	// embedded = the wizard is shown inside the status screen (not as its own
+	// program). Then "q"/"esc" go back to the status screen instead of quitting
+	// the app, and ctrl+c quits.
+	embedded bool
+	onBack   func() tea.Cmd
 }
+
+// backMsg asks the host screen to close the wizard.
+type backMsg struct{}
 
 func newSetupModel(d Deps) setupModel {
 	mk := func(ph string) textinput.Model {
@@ -81,9 +90,14 @@ func (m setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "b": // explicit "back", whatever the screen
+			if m.scr == screenList {
+				return m.backOrQuit()
+			}
+			m.scr, m.err = screenList, ""
 		case "q", "esc":
 			if m.scr == screenList {
-				return m, tea.Quit
+				return m.backOrQuit()
 			}
 			if m.scr != screenQuickCode { // a pending Quick Connect keeps polling
 				m.scr, m.err = screenList, ""
@@ -120,6 +134,8 @@ func (m setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			return m.onEnter()
 		}
+	case backMsg:
+		return m.backOrQuit()
 	case quickPollMsg:
 		return m.quickResult(msg)
 	case tickMsg:
@@ -250,6 +266,15 @@ func (m *setupModel) store(c *jfin.Client, username, server, display string) {
 	m.scr, m.err, m.qc = screenList, "", nil
 }
 
+// backOrQuit leaves the list screen: embedded in the status UI it asks the host
+// to take us back, on its own it quits the wizard program.
+func (m setupModel) backOrQuit() (tea.Model, tea.Cmd) {
+	if m.embedded && m.onBack != nil {
+		return m, m.onBack()
+	}
+	return m, tea.Quit
+}
+
 // isControlKey reports whether a key drives the wizard rather than the text
 // field (typing must win over our single-letter shortcuts).
 func isControlKey(k tea.KeyMsg) bool {
@@ -266,12 +291,12 @@ func (m setupModel) View() string {
 	case screenList:
 		b.WriteString(panelW("accounts", 56, m.accountRows()...))
 		b.WriteString("\n")
-		b.WriteString(hints(
-			[2]string{"p", "add with password"},
-			[2]string{"i", "add with Quick Connect"},
-			[2]string{"r", "remove"},
-			[2]string{"q", "quit"},
-		))
+		rows := [][2]string{
+			{"p", "add with password"},
+			{"i", "add with Quick Connect"},
+			{"r", "remove"},
+		}
+		b.WriteString(hints(append(rows, m.listHints()...)...))
 	case screenAddPassword:
 		labels := []string{"Server", "Username", "Password"}
 		rows := make([]string, 0, len(m.inputs))
@@ -284,7 +309,8 @@ func (m setupModel) View() string {
 		}
 		b.WriteString(panelW("add account", 52, rows...))
 		b.WriteString("\n")
-		b.WriteString(hints([2]string{"enter", "next / log in"}, [2]string{"shift+tab", "back"}, [2]string{"esc", "cancel"}))
+		b.WriteString(hints([2]string{"enter", "next / log in"}, [2]string{"shift+tab", "back field"},
+			[2]string{"esc", "cancel"}, [2]string{"b", "back"}))
 	case screenAddQuickConnect:
 		b.WriteString(panelW("add account · quick connect", 52,
 			styDim.Render(pad("Server", 10))+m.inputs[0].View(),
@@ -312,6 +338,15 @@ func (m setupModel) View() string {
 		b.WriteString("\n" + styBad.Render("✖ "+m.err) + "\n")
 	}
 	return b.String()
+}
+
+// listHints are the trailing hints of the account list, which differ between
+// the standalone wizard and the wizard embedded in the status screen.
+func (m setupModel) listHints() [][2]string {
+	if m.embedded {
+		return [][2]string{{"esc", "back"}, {"ctrl+c", "quit"}}
+	}
+	return [][2]string{{"q", "quit"}}
 }
 
 // accountRows renders the account list, one line each.
