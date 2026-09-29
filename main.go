@@ -455,6 +455,14 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	})
 	pl := player.New(proc, lg)
 	pl.SetOptions(playerOptions(s))
+	// A change that alters what we ask the server for (bitrate, codec policy,
+	// direct play) re-requests the stream and resumes where we were, instead of
+	// waiting for the next item.
+	pl.SetProfileChangeHook(func() {
+		if pl.Restart() {
+			lg.Printf("transcode profile changed — stream re-requested, resuming playback")
+		}
+	})
 	volMem := volumeMemory(s, cfgPath, lg)
 	pl.SetVolumeMemory(volMem)
 	pl.SetVersion(version)

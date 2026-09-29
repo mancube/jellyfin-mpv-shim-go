@@ -174,6 +174,33 @@ func (p *Player) Options() Options {
 	return p.opt
 }
 
+// profileKey identifies the settings that decide what we ask the server for:
+// the transcode bitrates, the codec policy and the direct-play switch. When it
+// changes during playback the stream has to be re-requested.
+func (o Options) profileKey() string {
+	return fmt.Sprintf("%d/%d/%t/%t/%t/%t/%t/%t/%t",
+		o.LocalKbps, o.RemoteKbps, o.AlwaysTranscode, o.TranscodeH265,
+		o.ForceH264, o.TranscodeHi10p, o.TranscodeHDR, o.TranscodeDolbyVision,
+		o.DirectPaths)
+}
+
+// profileKey is the current profile identity of the options.
+func (p *Player) profileKey() string { return p.opt.profileKey() }
+
+// noteProfileChange remembers the profile key and returns a function to call
+// (with p.mu released) when it changed. The preference handlers run with the
+// lock held, so the hook is invoked by the caller afterwards.
+func (p *Player) noteProfileChange(before string) func() {
+	if p.profileKey() == before || p.onProfileChange == nil {
+		return func() {}
+	}
+	return func() { go p.onProfileChange() }
+}
+
+// SetProfileChangeHook installs the callback for "the transcode profile
+// changed" (main re-requests the stream).
+func (p *Player) SetProfileChangeHook(f func()) { p.onProfileChange = f }
+
 // SetSaveFunc installs the callback the preference menus use to persist a
 // settings change. It receives the new options, because it is called with
 // p.mu held: re-entering the player from here would deadlock.

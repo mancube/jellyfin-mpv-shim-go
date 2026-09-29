@@ -176,7 +176,14 @@ terminal.
 The OSD menu also has **Video Preferences** and **Player Preferences**
 sub-menus (transcode quality, subtitle size/colour/position, HDR/Hi10p/DVR
 toggles, auto-play, fullscreen, OSC, mouse menu, *remember volume & mute*, intro
-skipping …). Changes apply immediately and are written back to `config.json`.
+skipping …). Changes apply immediately and are written back to `config.json`; the cursor
+stays on the row you changed, so you can walk the list with the remote without
+losing your place.
+
+Changing a **transcode** setting (local or remote bitrate, disable direct play,
+HEVC/H.264, Hi10p/HDR/Dolby Vision, direct paths) while something is playing
+**re-requests the stream from the server at the new quality and resumes from the
+current position** — you do not have to wait for the next item.
 
 **Video Preferences** — remote *and* local transcode quality, transcode
 Hi10p / HDR / Dolby Vision, direct paths, disable direct play, allow HEVC /

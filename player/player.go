@@ -57,6 +57,9 @@ type Player struct {
 	// preference menus.
 	opt  Options
 	save func(Options)
+	// onProfileChange is called (without the lock) when a preference changed
+	// what we ask the server for.
+	onProfileChange func()
 
 	// update check (upstream update_check.py)
 	updateURL     string
@@ -398,6 +401,27 @@ func (p *Player) SetStreams(aid, sid *int) {
 	} else {
 		p.configureStreams()
 	}
+}
+
+// Restart re-runs playback for the current item, resuming where it is. It is
+// what a change to the transcode profile (bitrate, codec policy, direct play)
+// triggers: the old stream no longer matches what we would ask for, so the item
+// is re-requested with the new profile and continues from the same position.
+func (p *Player) Restart() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.media == nil {
+		return false
+	}
+	pos := p.lastPos
+	if x, err := p.mpv.GetProperty("time-pos"); err == nil {
+		if f, ok := x.(float64); ok {
+			pos = f
+		}
+	}
+	p.log.Printf("re-requesting the stream, resuming at %.1fs", pos)
+	p.restartLocked()
+	return true
 }
 
 func (p *Player) restartLocked() {

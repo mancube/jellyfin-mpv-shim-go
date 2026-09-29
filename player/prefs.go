@@ -184,13 +184,16 @@ func (m *menu) toggle(label string, on bool, set func(bool)) menuEntry {
 func (m *menu) setBool(set func(*Options, bool), apply func()) func(bool) {
 	return func(v bool) {
 		m.p.mu.Lock()
+		before := m.p.profileKey()
 		set(&m.p.opt, v)
 		m.p.saveNowLocked()
+		profileChanged := m.p.noteProfileChange(before)
 		m.p.mu.Unlock()
 		if apply != nil {
 			apply()
 		}
-		m.backToRoot() // upstream re-renders the parent menu
+		m.backToRoot() // re-render the page we are on, cursor included
+		profileChanged()
 	}
 }
 
@@ -235,6 +238,17 @@ func (m *menu) prefsEntries(title string) (string, []menuEntry) {
 	}
 }
 
+// selectedRow is the cursor position on the current page, or -1 when the menu
+// is closed. Used to put the cursor back on the setting that was just changed.
+func (m *menu) selectedRow() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.shown {
+		return -1
+	}
+	return m.frame.selected
+}
+
 // backToRoot returns to the preferences page after a change: pop out of
 // whatever submenu we are in, then *replace* the preferences page in place (not
 // re-push it), so the parent link stays intact and "back" keeps walking up the
@@ -249,7 +263,7 @@ func (m *menu) backToRoot() {
 		}
 		if isPrefPage(title) {
 			page, entries := m.prefsEntries(title)
-			m.replaceFrame(page, entries)
+			m.replaceFrame(page, entries, m.selectedRow())
 			return
 		}
 		if depth == 0 {
@@ -305,10 +319,13 @@ func indexOfQuality(kbps int) int {
 func (m *menu) pickQuality(set func(int), kbps int) func() {
 	return func() {
 		m.p.mu.Lock()
+		before := m.p.profileKey()
 		set(kbps)
 		m.p.saveNowLocked()
+		profileChanged := m.p.noteProfileChange(before)
 		m.p.mu.Unlock()
 		m.backToRoot()
+		profileChanged()
 	}
 }
 

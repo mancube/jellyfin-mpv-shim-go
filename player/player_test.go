@@ -2027,3 +2027,108 @@ func TestOSDIdleStopAndLogLevel(t *testing.T) {
 		t.Error("Stop When Idle could not be switched off")
 	}
 }
+
+// After changing a setting the cursor must stay on that row, not jump to the
+// top of the page.
+func TestPreferenceKeepsCursorOnChangedRow(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetSaveFunc(func(Options) {})
+
+	// A toggle on the second row of the Playback page.
+	openPlayerPage(t, h.pl, h.fm, "Playback")
+	moveTo(h.pl, h.fm, "Media Key Seek")
+	h.pl.Key("ok")
+	view := h.fm.lastText()
+	if !strings.Contains(view, "**") {
+		t.Fatalf("nothing highlighted after the change:\n%s", view)
+	}
+	if !strings.Contains(view, "**✔ Media Key Seek**") {
+		t.Errorf("cursor moved off the changed row:\n%s", view)
+	}
+	// And the cursor is where we were: Media Key Seek, not row 0.
+	idx := menuRowOf(h.fm.lastText(), "Media Key Seek")
+	sel := menuRowOf(h.fm.lastText(), "**")
+	if idx != sel {
+		t.Errorf("selected row = %d, want the Media Key Seek row (%d):\n%s", sel, idx, h.fm.lastText())
+	}
+
+	// Same for a row whose label changes (Stop When Idle).
+	moveTo(h.pl, h.fm, "Stop When Idle")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "15 minutes")
+	h.pl.Key("ok")
+	view = h.fm.lastText()
+	if !strings.Contains(view, "**Stop When Idle: 15m**") {
+		t.Errorf("cursor not kept on the row whose label changed:\n%s", view)
+	}
+}
+
+// menuRowOf returns the 0-based row index of a label in a rendered menu (-1 if
+// it is the highlighted one, use "**" for the cursor).
+func menuRowOf(text, label string) int {
+	rows := 0
+	for i, line := range strings.Split(text, "\n") {
+		if i == 0 {
+			continue
+		}
+		if strings.Contains(line, label) {
+			return rows
+		}
+		rows++
+	}
+	return -1
+}
+
+// Changing a transcode-profile setting while playing re-requests the stream
+// and resumes at the same position (instead of waiting for the next item).
+func TestProfileChangeRestartsStream(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	var restarts int
+	done := make(chan struct{}, 4)
+	h.pl.SetProfileChangeHook(func() { restarts++; done <- struct{}{} })
+
+	// A profile setting: the local bitrate, in Video Preferences.
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, videoPrefsTitle)
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Local Transcode Quality")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "540p 1.5 Mbps")
+	h.pl.Key("ok")
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no profile-change hook after changing the local bitrate")
+	}
+	if h.pl.Options().LocalKbps != 1500 {
+		t.Errorf("LocalKbps = %d, want 1500", h.pl.Options().LocalKbps)
+	}
+
+	// Restart reloads the item and keeps the position.
+	h.fm.SetProperty("time-pos", 42.0)
+	before := h.fm.numLoads()
+	if !h.pl.Restart() {
+		t.Fatal("Restart reported nothing to restart")
+	}
+	if got := h.fm.numLoads(); got != before+1 {
+		t.Errorf("restart did not reload: %d → %d loads", before, got)
+	}
+	if pos := h.fm.prop("time-pos"); pos == nil || pos.(float64) < 41 {
+		t.Errorf("resume position = %v, want ~42", pos)
+	}
+
+	// A setting that does not touch the profile must not fire the hook.
+	restarts = 0
+	openPlayerPage(t, h.pl, h.fm, "Subtitles")
+	moveTo(h.pl, h.fm, "Size")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Huge")
+	h.pl.Key("ok")
+	time.Sleep(150 * time.Millisecond)
+	if restarts != 0 {
+		t.Errorf("a subtitle change triggered %d restarts, want 0", restarts)
+	}
+}
