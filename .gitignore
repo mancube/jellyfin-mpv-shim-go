@@ -7,3 +7,6 @@
 
 # test binaries
 *.test
+
+# local development log (per-machine notes, not part of the project)
+progress.md
