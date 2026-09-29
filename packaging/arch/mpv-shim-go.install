@@ -1,0 +1,5 @@
+# The tray is optional: without a StatusNotifier host the app logs a hint and
+# the TUI keeps working, so this is a soft dependency.
+optdepends=('libappindicator-gtk3: desktop tray on GNOME')
+
+# First run: mpv-shim opens its own wizard when there is a terminal.

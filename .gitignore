@@ -1,6 +1,9 @@
 # build output
 /mpv-shim
 /dist
+/src
+/pkg
+*.pkg.tar.*
 
 # test binaries
 *.test

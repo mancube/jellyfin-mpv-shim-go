@@ -38,12 +38,47 @@ Deliberately **not** included: music, live TV, the in-mpv library browser,
 offline sync, SyncPlay, display mirroring, shader packs/SVP, trickplay
 thumbnails, bulk subtitles, Discord presence, i18n.
 
-## Build
+## Install
 
-Requires Go 1.24+ and an `mpv` binary on the machine (tested against mpv 0.41).
+One static binary, plus a launcher entry. Requires an `mpv` binary on the
+machine (tested against mpv 0.41); everything else is optional.
+
+**Arch / pacman** — builds from this checkout and installs a launcher entry:
 
 ```sh
-go build -o mpv-shim .
+./packaging/arch/build.sh --install     # makepkg + pacman -U
+sudo pacman -R mpv-shim-go              # and remove it again
+```
+
+**Any Linux** — binary + `.desktop` + icon:
+
+```sh
+sudo make install            # PREFIX=/usr/local by default
+sudo make uninstall
+```
+
+**macOS** — `.app` bundle (unsigned; see [packaging/README.md](packaging/README.md)):
+
+```sh
+./packaging/macos/make-app.sh && ./packaging/macos/install-app.sh
+```
+
+**Windows** — a portable zip from any OS, or an Inno Setup installer built on
+Windows:
+
+```sh
+./packaging/windows/build-portable.sh
+```
+
+Details, systemd unit and per-platform caveats: [packaging/README.md](packaging/README.md).
+
+## Build from source
+
+Requires Go 1.24+.
+
+```sh
+make            # build ./mpv-shim
+make test       # go vet + go test -race
 ```
 
 Cross-compiles cleanly (the tray is the only platform-specific part; drop it
@@ -151,6 +186,7 @@ worth a manual pass.
 
 ```sh
 go vet ./... && go test -race -count=1 ./...   # the gate before every commit
+make test                                       # the same, as a target
 ```
 
 Tests are stdlib `testing` + `httptest` + a fake mpv — no frameworks, no

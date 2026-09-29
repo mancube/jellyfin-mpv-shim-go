@@ -1,0 +1,71 @@
+# Maintainer: mpv-shim-go contributors
+#
+# Build from a local checkout:
+#   cd <repo root> && makepkg -f packaging/arch/PKGBUILD
+# Install / remove:
+#   pacman -U ./mpv-shim-go-*.pkg.tar.zst
+#   pacman -R mpv-shim-go
+
+pkgname=mpv-shim-go
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Jellyfin v12 cast client for mpv — remote control, OSD menu, TUI and tray"
+arch=('x86_64' 'aarch64')
+url="https://git.nas.lan/ikac/jellyfin-mpv-shim-go"
+license=('GPL3')
+depends=('mpv')
+makedepends=('go')
+optdepends=('xdg-utils: open the config folder from the tray menu')
+install="$pkgname.install"
+source=()
+sha256sums=()
+
+# The version tracks the git checkout, so `git pull` + rebuild is enough.
+# makepkg forbids hyphens/spaces in a version, so the commit and the dirty
+# flag are folded into pkgrel: 0.1.0.r<commits>.g<sha>[.dirty].
+pkgver() {
+  cd "$startdir" || return 1
+  local v=""
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    v=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
+  fi
+  echo "${v:-0.1.0}"   # no tag yet: fall back to the declared version
+}
+
+pkgrel() {
+  cd "$startdir" || return 1
+  local commits sha dirty=""
+  commits=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+  sha=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+  git diff --quiet HEAD 2>/dev/null || dirty=".dirty"
+  echo "${commits}.g${sha}${dirty}"
+}
+
+build() {
+  cd "$startdir"
+  export CGO_ENABLED=0
+  export GOFLAGS=-mod=mod
+  go build -trimpath \
+    -ldflags "-s -w -X main.version=$(pkgver)" \
+    -o "$srcdir/mpv-shim" .
+}
+
+check() {
+  cd "$startdir"
+  # Explicit package list: makepkg's own src/ and pkg/ scratch dirs live in
+  # the same tree, and "./..." would walk into them.
+  local pkgs=(./ ./jfin ./player ./ui)
+  go vet "${pkgs[@]}"
+  go test "${pkgs[@]}"
+}
+
+package() {
+  # $startdir is the checkout; package() may run from elsewhere.
+  install -Dm755 "$srcdir/mpv-shim" "$pkgdir/usr/bin/mpv-shim"
+  install -Dm644 "$startdir/packaging/desktop/io.github.ikac.mpv-shim.desktop" \
+    "$pkgdir/usr/share/applications/io.github.ikac.mpv-shim.desktop"
+  install -Dm644 "$startdir/packaging/icon/io.github.ikac.mpv-shim.png" \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/io.github.ikac.mpv-shim.png"
+  install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 "$startdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

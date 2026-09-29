@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Jellyfin MPV Shim
+GenericName=Jellyfin Video Player
+Comment=Cast Jellyfin video to a local mpv window
+Exec=mpv-shim
+Icon=io.github.ikac.mpv-shim
+Terminal=true
+Categories=AudioVideo;Player;
+Keywords=Jellyfin;mpv;cast;streaming;video;
+StartupNotify=false
+Actions=Background;Status;
+
+[Desktop Action Background]
+Name=Start in background (no TUI)
+Exec=mpv-shim --headless
+
+[Desktop Action Status]
+Name=Check connection and exit
+Exec=mpv-shim -status
