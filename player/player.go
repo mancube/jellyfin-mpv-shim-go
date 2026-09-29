@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os/exec"
+	"runtime"
 	"sync"
 	"time"
 
@@ -53,6 +55,10 @@ type Player struct {
 	lastActivity time.Time
 	// ScreenshotDir is where TakeScreenshot writes frames.
 	ScreenshotDir string
+	// opt holds the runtime settings; save persists changes made by the OSD
+	// preference menus.
+	opt  Options
+	save func()
 	// PauseReport mirrors the pause_report setting: report immediately when
 	// the remote pauses/unpauses.
 	PauseReport bool
@@ -73,7 +79,11 @@ func New(mpv Mpv, lg *log.Logger) *Player {
 		lg = log.Default()
 	}
 	// pause_report defaults on; initialEcho collects mpv's subscribe echoes.
-	p := &Player{mpv: mpv, log: lg, PauseReport: true, initialEcho: map[string]bool{}}
+	p := &Player{
+		mpv: mpv, log: lg, PauseReport: true,
+		initialEcho: map[string]bool{},
+		opt:         DefaultOptions(),
+	}
 	p.menu = newMenu(p)
 	return p
 }
@@ -162,6 +172,46 @@ func (p *Player) idleCheckLocked() {
 	p.log.Printf("idle for %s — stopping playback", p.idleStop)
 	p.touchLocked()
 	p.stopLocked()
+	if p.opt.ShellCmds.Idle != "" {
+		p.runShell("idle_cmd", p.opt.ShellCmds.Idle)
+	}
+}
+
+// timeoutLocked is how long we wait for mpv to report a duration.
+func (p *Player) timeoutLocked() time.Duration {
+	if p.opt.PlaybackTimeout > 0 {
+		return p.opt.PlaybackTimeout
+	}
+	return 30 * time.Second
+}
+
+// applySubtitleStyleLocked pushes sub-scale/sub-color/sub-pos after a file
+// load (mpv resets some of them per file).
+func (p *Player) applySubtitleStyleLocked() {
+	if p.opt.SubSize > 0 {
+		p.mpv.SetProperty("sub-scale", fmt.Sprintf("%.2f", float64(p.opt.SubSize)/100))
+	}
+	if p.opt.SubColor != "" {
+		p.mpv.SetProperty("sub-color", p.opt.SubColor)
+	}
+	if pos := subPos(p.opt.SubPosition); pos != "" {
+		p.mpv.SetProperty("sub-pos", pos)
+	}
+}
+
+// raiseWindowLocked brings the mpv window forward when a new item starts, so
+// casting from the couch does not need a click (upstream raise_mpv).
+func (p *Player) raiseWindowLocked() {
+	switch runtime.GOOS {
+	case "darwin", "windows":
+		// The window manager raises the player on focus; nothing portable to do.
+		return
+	default:
+		// `xdotool`/KDE's kdotool are optional; ignore when absent.
+		if _, err := exec.LookPath("xdotool"); err == nil {
+			_ = exec.Command("xdotool", "search", "--name", "mpv", "windowactivate").Run()
+		}
+	}
 }
 
 func (p *Player) HasVideo() bool {
@@ -233,6 +283,7 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	}
 	p.shouldSendTimeline = false
 	p.start = time.Now()
+	p.runShell("pre_media_cmd", p.opt.ShellCmds.PreMedia)
 	url, err := v.PlaybackURL(p.ctx)
 	if err != nil {
 		return fmt.Errorf("playback url: %w", err)
@@ -253,7 +304,7 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 		p.doNotHandlePause = false
 		return err
 	}
-	if !p.waitForDuration(30 * time.Second) {
+	if !p.waitForDuration(p.timeoutLocked()) {
 		p.doNotHandlePause = false
 		p.stopLocked()
 		return errors.New("timeout waiting for media")
@@ -265,6 +316,14 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	p.lastMute = false
 	p.watchedMarked = false
 	p.configureStreams()
+	p.applySubtitleStyleLocked()
+	if p.opt.Fullscreen {
+		p.mpv.SetProperty("fullscreen", true)
+	}
+	if p.opt.RaiseMPV {
+		p.raiseWindowLocked()
+	}
+	p.runShell("play_cmd", p.opt.ShellCmds.Play)
 	if offset > 0 {
 		p.lastSeek = offset
 		p.lastPos = offset
@@ -310,6 +369,7 @@ func (p *Player) stopLocked() {
 	if err := v.M.C.SessionStopped(p.ctx, opts); err != nil {
 		p.log.Printf("session stopped: %v", err)
 	}
+	p.runShell("stop_cmd", p.opt.ShellCmds.Stop)
 }
 
 // InsertQueue adds ids to the queue (PlayNext after current, PlayLast at the
@@ -508,11 +568,13 @@ func (p *Player) handleEndFileLocked() {
 	v := m.Video
 	if !p.watchedMarked {
 		p.watchedMarked = true
-		if err := v.M.C.SetPlayed(p.ctx, v.ID, true); err != nil {
-			p.log.Printf("set watched: %v", err)
+		if p.opt.ForceSetPlayed || p.opt.AutoPlay {
+			if err := v.M.C.SetPlayed(p.ctx, v.ID, true); err != nil {
+				p.log.Printf("set watched: %v", err)
+			}
 		}
 	}
-	if m.HasNext() {
+	if m.HasNext() && p.opt.AutoPlay {
 		p.sendStopped(true)
 		next, err := m.Next(p.ctx)
 		if err != nil || next == nil {
@@ -534,6 +596,7 @@ func (p *Player) handleEndFileLocked() {
 		p.shouldSendTimeline = false
 		p.url = ""
 	}
+	p.runShell("media_ended_cmd", p.opt.ShellCmds.MediaEnded)
 }
 
 // exitWatch reacts to mpv process death: graceful → stop report; crash →

@@ -63,6 +63,10 @@ func (p *Player) Key(action string) {
 		}
 	case "fullscreen":
 		p.ToggleFullscreen()
+	case "media-next":
+		p.mediaKeyNext()
+	case "media-prev":
+		p.mediaKeyPrev()
 	case "stop":
 		p.Stop()
 	case "next":
@@ -87,6 +91,28 @@ func (p *Player) MenuAction(action string) {
 		p.menu.Action(action)
 		return
 	}
+	// Upstream kb_seek: the arrow keys are seek steps, configurable.
+	p.mu.Lock()
+	o := p.opt
+	p.mu.Unlock()
+	seek := func(delta float64, vertical bool) {
+		if vertical {
+			p.seekBy(delta, o.SeekVExact)
+			return
+		}
+		if o.UseWebSeek {
+			// Honour the remote's own skip lengths when the server sent them.
+			back, fwd, ok := p.webSeekLengths()
+			if ok {
+				if action == "left" {
+					delta = back
+				} else if action == "right" {
+					delta = fwd
+				}
+			}
+		}
+		p.seekBy(delta, o.SeekHExact)
+	}
 	switch action {
 	case "home":
 		p.menu.Show()
@@ -94,14 +120,40 @@ func (p *Player) MenuAction(action string) {
 		// Upstream: ESC outside the menu leaves fullscreen.
 		p.setFullscreen(false)
 	case "up":
-		p.seekRelative(60)
+		seek(o.SeekUp, true)
 	case "down":
-		p.seekRelative(-60)
+		seek(o.SeekDown, true)
 	case "left":
-		p.seekRelative(-5)
+		seek(o.SeekLeft, false)
 	case "right":
-		p.seekRelative(5)
+		seek(o.SeekRight, false)
 	}
+}
+
+// seekBy seeks by delta seconds, optionally keyframe-exact (upstream
+// seek_h_exact/seek_v_exact).
+func (p *Player) seekBy(delta float64, exact bool) {
+	if exact {
+		p.mu.Lock()
+		p.mu.Unlock()
+		p.seekExact(delta)
+		return
+	}
+	p.seekRelative(delta)
+}
+
+// seekExact is the keyframe-accurate variant of seekRelative.
+func (p *Player) seekExact(delta float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.media == nil || p.aborted() {
+		return
+	}
+	p.touchLocked()
+	if err := p.mpv.Command("seek", delta, "relative+exact"); err != nil {
+		p.log.Printf("exact seek %+v: %v", delta, err)
+	}
+	p.sendProgressLocked()
 }
 
 // seekRelative seeks by delta seconds (mpv keybindings: arrows, jump keys).
@@ -307,6 +359,71 @@ func (p *Player) jumpLocked(delta int) {
 	if err := p.playLocked(next, 0); err != nil {
 		p.log.Printf("play %d: %v", target, err)
 	}
+}
+
+// mediaKeyNext/mediaKeyPrev implement the media keys: seek, or skip episodes
+// when media_key_seek is off (upstream handle_media_next/prev).
+func (p *Player) mediaKeyNext() {
+	p.mu.Lock()
+	seek := p.opt.MediaKeySeek
+	isIntro := p.isInIntroLocked()
+	p.mu.Unlock()
+	switch {
+	case isIntro:
+		p.skipIntro()
+	case seek:
+		p.MenuAction("right")
+	default:
+		p.Next()
+	}
+}
+
+func (p *Player) mediaKeyPrev() {
+	p.mu.Lock()
+	seek := p.opt.MediaKeySeek
+	p.mu.Unlock()
+	if seek {
+		p.MenuAction("left")
+		return
+	}
+	p.Prev()
+}
+
+func (p *Player) skipIntro() {
+	p.mu.Lock()
+	pos := p.lastPos
+	var end float64 = -1
+	if p.media != nil {
+		for i := range p.media.Video.Intros {
+			in := &p.media.Video.Intros[i]
+			if !in.HasTriggered && in.Type != "Outro" && pos >= in.Start && pos <= in.End {
+				end = in.End
+				in.HasTriggered = true
+				break
+			}
+		}
+	}
+	aborted := p.aborted()
+	p.mu.Unlock()
+	if end < 0 || aborted {
+		return
+	}
+	p.Seek(end, true)
+	p.mpv.ShowText("Skipped Intro", 3000, 1)
+}
+
+// isInIntroLocked reports whether playback is inside an unskipped intro.
+func (p *Player) isInIntroLocked() bool {
+	if p.media == nil {
+		return false
+	}
+	for i := range p.media.Video.Intros {
+		in := &p.media.Video.Intros[i]
+		if !in.HasTriggered && in.Type != "Outro" && p.lastPos >= in.Start && p.lastPos <= in.End {
+			return true
+		}
+	}
+	return false
 }
 
 // StepVolume changes the volume by delta (remote VolumeUp/VolumeDown).

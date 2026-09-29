@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -148,7 +149,7 @@ func run() int {
 				return 1
 			}
 		}
-		return runSession(&s, a, creds, credPath, cfgDir, !*headless && isTTY())
+		return runSession(&s, a, creds, credPath, cfgDir, *configPath, !*headless && isTTY())
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected login, accounts, setup)\n", sub)
 		return 2
@@ -223,7 +224,28 @@ type session struct {
 }
 
 // newSession wires the client, mpv, player and WS event handlers.
-func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, configDir string) (*session, error) {
+// playerOptions maps the config onto the player's runtime options.
+func playerOptions(s *Settings) player.Options {
+	o := player.DefaultOptions()
+	o.Keys = s.Keys()
+	o.SeekUp, o.SeekDown, o.SeekLeft, o.SeekRight = s.SeekUp, s.SeekDown, s.SeekLeft, s.SeekRight
+	o.SeekHExact, o.SeekVExact = s.SeekHExact, s.SeekVExact
+	o.UseWebSeek = s.UseWebSeek
+	o.MediaKeySeek = s.MediaKeySeek
+	o.SubSize, o.SubColor, o.SubPosition = s.SubtitleSize, s.SubtitleColor, s.SubPosition()
+	o.AutoPlay, o.Fullscreen, o.RaiseMPV, o.EnableOSC = s.AutoPlay, s.Fullscreen, s.RaiseMPV, s.EnableOSC
+	o.ForceSetPlayed = s.ForceSetPlayed
+	o.PlaybackTimeout = time.Duration(s.PlaybackTimeoutS) * time.Second
+	o.IdleCmdDelay = time.Duration(s.IdleCmdDelayS) * time.Second
+	o.SanitizeOutput = s.SanitizeOutput
+	o.ShellCmds = player.ShellCmds{
+		PreMedia: s.PreMediaCmd, Play: s.PlayCmd, Stop: s.StopCmd,
+		MediaEnded: s.MediaEndedCmd, Idle: s.IdleCmd, IdleEnded: s.IdleEndedCmd,
+	}
+	return o
+}
+
+func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, configDir, cfgPath string) (*session, error) {
 	client := jfin.New(a.Server, s.PlayerName, a.DeviceID, version, s.IgnoreSSL)
 	client.Token, client.UserID = a.AccessToken, a.UserID
 
@@ -242,11 +264,21 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 		Log:        lg,
 	})
 	pl := player.New(proc, lg)
+	pl.SetOptions(playerOptions(s))
+	pl.SetSaveFunc(func() {
+		// The OSD preference menus change settings at runtime; write them back.
+		if err := s.Save(cfgPath); err != nil {
+			lg.Printf("saving config: %v", err)
+		}
+	})
 	if s.IdleStop {
 		pl.SetIdleStop(time.Duration(s.IdleDelayS) * time.Second)
 	}
 	pl.PauseReport = s.PauseReport
-	pl.ScreenshotDir = filepath.Join(configDir, "screenshots")
+	pl.ScreenshotDir = s.ScreenshotDir
+	if pl.ScreenshotDir == "" {
+		pl.ScreenshotDir = filepath.Join(configDir, "screenshots")
+	}
 
 	mcfg := jfin.MediaConfig{
 		LocalKbps: s.LocalKbps, RemoteKbps: s.RemoteKbps,
@@ -255,6 +287,9 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	}
 
 	ws := jfin.NewWS(client, lg)
+	if s.HealthCheckS > 0 {
+		ws.HealthInterval = time.Duration(s.HealthCheckS) * time.Second
+	}
 	ws.On("Play", func(ctx context.Context, data json.RawMessage) {
 		go handlePlay(ctx, client, pl, mcfg, data) // don't block the WS read loop
 	})
@@ -331,9 +366,12 @@ func (sess *session) run(ctx context.Context) {
 
 // runSession is the whole app for one account: the session loop plus, when
 // there is a terminal, the TUI status screen and the desktop tray.
-func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfgDir string, interactive bool) int {
+func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfgDir, cfgPath string, interactive bool) int {
 	ring := ui.NewLogRing(200)
 	var out io.Writer = io.MultiWriter(ring, os.Stderr)
+	if s.SanitizeOutput {
+		out = &redactWriter{w: out} // upstream sanitize_output
+	}
 	if s.WriteLog {
 		if f, err := openLogFile(cfgDir); err != nil {
 			log.Printf("log file: %v", err)
@@ -343,7 +381,7 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 		}
 	}
 	lg := log.New(out, "", log.Flags())
-	sess, err := newSession(s, a, lg, ring, cfgDir)
+	sess, err := newSession(s, a, lg, ring, cfgDir, cfgPath)
 	if err != nil {
 		lg.Printf("%v", err)
 		return 1
@@ -602,6 +640,32 @@ func mpvLogLevel(s *Settings) string {
 	default:
 		return "info"
 	}
+}
+
+// redactWriter masks credentials in the log stream (upstream
+// log_utils.sanitize_output). Our own requests never put tokens in URLs, but
+// server errors and header dumps can.
+type redactWriter struct{ w io.Writer }
+
+var redactions = []struct {
+	re   *regexp.Regexp
+	with string
+}{
+	{regexp.MustCompile(`(?i)(api_key=)[^&\s"]+`), "${1}REDACTED"},
+	{regexp.MustCompile(`(?i)(Token=")[^"]+`), "${1}REDACTED"},
+	{regexp.MustCompile(`(?i)(Authorization:\s*MediaBrowser[^"]*Token=")[^"]+`), "${1}REDACTED"},
+	{regexp.MustCompile(`(?i)("X-Emby-Token":\s*")[^"]+`), "${1}REDACTED"},
+}
+
+func (r *redactWriter) Write(p []byte) (int, error) {
+	line := string(p)
+	for _, re := range redactions {
+		line = re.re.ReplaceAllString(line, re.with)
+	}
+	if _, err := io.WriteString(r.w, line); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 // openLogFile appends to <config dir>/mpv-shim.log (the write_log setting).

@@ -55,6 +55,9 @@ type MediaSource struct {
 	LiveStreamId               string        `json:"LiveStreamId"`
 	DefaultAudioStreamIndex    *int          `json:"DefaultAudioStreamIndex"`
 	DefaultSubtitleStreamIndex *int          `json:"DefaultSubtitleStreamIndex"`
+	// CustomPrefs carries the server's per-client preferences for this source
+	// (e.g. SkipBackLength/SkipForwardLength when use_web_seek is on).
+	CustomPrefs map[string]any `json:"CustomPrefs,omitempty"`
 }
 
 // PlaybackInfo is the POST /Items/{id}/PlaybackInfo response.

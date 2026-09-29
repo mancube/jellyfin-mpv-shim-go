@@ -103,7 +103,13 @@ func (m *menu) Hide() {
 	m.p.mpv.SetProperty("osd-back-color", color)
 	m.p.mpv.SetProperty("osd-font-size", size)
 	m.p.mpv.SetProperty("osd-border-style", border)
-	m.p.mpv.SetProperty("osc", true)
+	// Restore the OSC to the user's preference (upstream enable_osc), not to a
+	// hardcoded on.
+	if m.p.Options().EnableOSC {
+		m.p.mpv.SetProperty("osc", true)
+	} else {
+		m.p.mpv.SetProperty("osc", false)
+	}
 	m.p.SetPaused(false)
 }
 
