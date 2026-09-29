@@ -79,13 +79,13 @@ func (p *Player) Start(ctx context.Context) {
 // Status is a snapshot for the TUI/systray. Player is busy, so Status never
 // blocks: it answers from the last known state when mpv is unreachable.
 type Status struct {
-	Title   string
+	Title    string
 	Position float64
 	Duration float64
-	Paused  bool
-	Volume  float64
-	Mute    bool
-	Playing bool
+	Paused   bool
+	Volume   float64
+	Mute     bool
+	Playing  bool
 }
 
 // Status returns a snapshot of the current playback.

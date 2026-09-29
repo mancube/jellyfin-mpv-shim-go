@@ -115,8 +115,8 @@ func (f *fakeServer) client() *Client {
 func newTestMedia(t *testing.T, c *Client, itemID string, local bool) *Media {
 	t.Helper()
 	m := &Media{
-		C: c,
-		Cfg: MediaConfig{LocalKbps: 10000, RemoteKbps: 3000},
+		C:     c,
+		Cfg:   MediaConfig{LocalKbps: 10000, RemoteKbps: 3000},
 		Queue: []PlaylistItem{{PlaylistItemId: "p1", ID: itemID}},
 		Seq:   0, UserID: "u1", IsLocal: local,
 	}
@@ -268,7 +268,7 @@ func TestQueueTransitions(t *testing.T) {
 	if !m.HasNext() || m.HasPrev() {
 		t.Fatal("initial position flags wrong")
 	}
-	m.Insert([]string{"i4"}, false) // PlayNext: after current
+	m.Insert([]string{"i4"}, false)      // PlayNext: after current
 	m.Insert([]string{"i5", "i6"}, true) // PlayLast: at end
 	want := []string{"i1", "i4", "i2", "i3", "i5", "i6"}
 	var got []string
@@ -302,7 +302,10 @@ func TestProperTitle(t *testing.T) {
 }
 
 func TestHasScheme(t *testing.T) {
-	cases := []struct{ s string; want bool }{
+	cases := []struct {
+		s    string
+		want bool
+	}{
 		{"C:\\videos\\x.mkv", false},
 		{"/mnt/nas/x.mkv", false},
 		{"smb://nas/share/x.mkv", true},

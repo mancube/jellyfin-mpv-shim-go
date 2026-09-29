@@ -17,16 +17,16 @@ type ProfileOpts struct {
 // Profile is the DeviceProfile sent with PlaybackInfo requests. Port of
 // upstream utils.get_profile (the static JSON, with our two codec knobs).
 type Profile struct {
-	Name                             string          `json:"Name"`
-	MaxStreamingBitrate              int             `json:"MaxStreamingBitrate"`
-	MaxStaticBitrate                 int             `json:"MaxStaticBitrate"`
-	MusicStreamingTranscodingBitrate int             `json:"MusicStreamingTranscodingBitrate"`
-	TimelineOffsetSeconds            int             `json:"TimelineOffsetSeconds"`
-	TranscodingProfiles              []Transcoding   `json:"TranscodingProfiles"`
-	DirectPlayProfiles               []Transcoding   `json:"DirectPlayProfiles"`
-	ResponseProfiles                 []any           `json:"ResponseProfiles"`
-	ContainerProfiles                []any           `json:"ContainerProfiles"`
-	CodecProfiles                    []any           `json:"CodecProfiles"`
+	Name                             string            `json:"Name"`
+	MaxStreamingBitrate              int               `json:"MaxStreamingBitrate"`
+	MaxStaticBitrate                 int               `json:"MaxStaticBitrate"`
+	MusicStreamingTranscodingBitrate int               `json:"MusicStreamingTranscodingBitrate"`
+	TimelineOffsetSeconds            int               `json:"TimelineOffsetSeconds"`
+	TranscodingProfiles              []Transcoding     `json:"TranscodingProfiles"`
+	DirectPlayProfiles               []Transcoding     `json:"DirectPlayProfiles"`
+	ResponseProfiles                 []any             `json:"ResponseProfiles"`
+	ContainerProfiles                []any             `json:"ContainerProfiles"`
+	CodecProfiles                    []any             `json:"CodecProfiles"`
 	SubtitleProfiles                 []SubtitleProfile `json:"SubtitleProfiles"`
 }
 
@@ -85,9 +85,9 @@ func DeviceProfile(o ProfileOpts) (*Profile, error) {
 			{Type: "Audio"},
 			{Type: "Photo"},
 		},
-		ResponseProfiles:    []any{},
-		ContainerProfiles:   []any{},
-		CodecProfiles:       []any{},
+		ResponseProfiles:  []any{},
+		ContainerProfiles: []any{},
+		CodecProfiles:     []any{},
 		SubtitleProfiles: []SubtitleProfile{
 			{"srt", "External"}, {"srt", "Embed"},
 			{"ass", "External"}, {"ass", "Embed"},

@@ -28,30 +28,30 @@ type Item struct {
 
 // MediaStream is one audio/subtitle stream of a MediaSource.
 type MediaStream struct {
-	Index           int    `json:"Index"`
-	Type            string `json:"Type"` // "Audio" | "Subtitle"
-	Title           string `json:"Title"`
-	Language        string `json:"Language"`
-	IsExternal      bool   `json:"IsExternal"`
-	DeliveryMethod  string `json:"DeliveryMethod"` // "Embed" | "External" | "Encode"
-	DeliveryUrl     string `json:"DeliveryUrl"`
+	Index          int    `json:"Index"`
+	Type           string `json:"Type"` // "Audio" | "Subtitle"
+	Title          string `json:"Title"`
+	Language       string `json:"Language"`
+	IsExternal     bool   `json:"IsExternal"`
+	DeliveryMethod string `json:"DeliveryMethod"` // "Embed" | "External" | "Encode"
+	DeliveryUrl    string `json:"DeliveryUrl"`
 }
 
 // MediaSource is one playable source of an item (a container on disk, or a
 // transcode).
 type MediaSource struct {
-	ID                           string        `json:"Id"`
-	Protocol                     string        `json:"Protocol"` // "File" | "Http" | "Http-Hls"
-	Path                         string        `json:"Path"`
-	SupportsDirectPlay           bool          `json:"SupportsDirectPlay"`
-	SupportsDirectStream         bool          `json:"SupportsDirectStream"`
-	SupportsTranscoding          bool          `json:"SupportsTranscoding"`
-	TranscodingUrl               string        `json:"TranscodingUrl"`
-	Bitrate                      float64       `json:"Bitrate"`
-	MediaStreams                 []MediaStream `json:"MediaStreams"`
-	LiveStreamId                 string        `json:"LiveStreamId"`
-	DefaultAudioStreamIndex      *int          `json:"DefaultAudioStreamIndex"`
-	DefaultSubtitleStreamIndex   *int          `json:"DefaultSubtitleStreamIndex"`
+	ID                         string        `json:"Id"`
+	Protocol                   string        `json:"Protocol"` // "File" | "Http" | "Http-Hls"
+	Path                       string        `json:"Path"`
+	SupportsDirectPlay         bool          `json:"SupportsDirectPlay"`
+	SupportsDirectStream       bool          `json:"SupportsDirectStream"`
+	SupportsTranscoding        bool          `json:"SupportsTranscoding"`
+	TranscodingUrl             string        `json:"TranscodingUrl"`
+	Bitrate                    float64       `json:"Bitrate"`
+	MediaStreams               []MediaStream `json:"MediaStreams"`
+	LiveStreamId               string        `json:"LiveStreamId"`
+	DefaultAudioStreamIndex    *int          `json:"DefaultAudioStreamIndex"`
+	DefaultSubtitleStreamIndex *int          `json:"DefaultSubtitleStreamIndex"`
 }
 
 // PlaybackInfo is the POST /Items/{id}/PlaybackInfo response.
@@ -76,22 +76,22 @@ type MediaSegment struct {
 
 // Intro is a media segment in seconds (port of upstream media.Intro).
 type Intro struct {
-	Type        string  `json:"Type"`
-	Start       float64 `json:"Start"`
-	End         float64 `json:"End"`
-	HasTriggered bool   `json:"-"`
+	Type         string  `json:"Type"`
+	Start        float64 `json:"Start"`
+	End          float64 `json:"End"`
+	HasTriggered bool    `json:"-"`
 }
 
 // PlayRequest is the WS "Play" event payload.
 type PlayRequest struct {
-	PlayCommand        string   `json:"PlayCommand"` // "PlayNow" | "PlayNext" | "PlayLast"
-	ItemIDs            []string `json:"ItemIds"`
-	StartIndex         *int     `json:"StartIndex"`
-	ControllingUserID  string   `json:"ControllingUserId"`
-	AudioStreamIndex   *int     `json:"AudioStreamIndex"`
-	SubtitleStreamIndex *int    `json:"SubtitleStreamIndex"`
-	MediaSourceID      *string  `json:"MediaSourceId"`
-	StartPositionTicks *int64   `json:"StartPositionTicks"`
+	PlayCommand         string   `json:"PlayCommand"` // "PlayNow" | "PlayNext" | "PlayLast"
+	ItemIDs             []string `json:"ItemIds"`
+	StartIndex          *int     `json:"StartIndex"`
+	ControllingUserID   string   `json:"ControllingUserId"`
+	AudioStreamIndex    *int     `json:"AudioStreamIndex"`
+	SubtitleStreamIndex *int     `json:"SubtitleStreamIndex"`
+	MediaSourceID       *string  `json:"MediaSourceId"`
+	StartPositionTicks  *int64   `json:"StartPositionTicks"`
 }
 
 // BufferedRange is one element of SessionInfo.BufferedRanges.
@@ -104,21 +104,21 @@ type BufferedRange struct {
 // /Sessions/Playing/Progress and /Sessions/Playing/Stopped — one struct, as
 // upstream builds it with a single options dict.
 type SessionInfo struct {
-	ItemID                   string         `json:"ItemId"`
-	MediaSourceID            string         `json:"MediaSourceId"`
-	PlaySessionID            string         `json:"PlaySessionId"`
-	PlaylistItemID           string         `json:"PlaylistItemId,omitempty"`
-	PlayMethod               string         `json:"PlayMethod"` // "DirectPlay" | "Transcode"
-	LiveStreamID             string         `json:"LiveStreamId,omitempty"`
-	CanSeek                  bool           `json:"CanSeek"`
-	IsPaused                 bool           `json:"IsPaused"`
-	IsMuted                  bool           `json:"IsMuted"`
-	VolumeLevel              int            `json:"VolumeLevel"`
-	PositionTicks            int64          `json:"PositionTicks"`
-	PlaybackStartTimeTicks   int64          `json:"PlaybackStartTimeTicks"`
-	SubtitleStreamIndex      int            `json:"SubtitleStreamIndex"`
-	AudioStreamIndex         int            `json:"AudioStreamIndex"`
-	RepeatMode               string         `json:"RepeatMode"`
-	BufferedRanges           []BufferedRange `json:"BufferedRanges,omitempty"`
-	NowPlayingQueue          []PlaylistItem `json:"NowPlayingQueue,omitempty"`
+	ItemID                 string          `json:"ItemId"`
+	MediaSourceID          string          `json:"MediaSourceId"`
+	PlaySessionID          string          `json:"PlaySessionId"`
+	PlaylistItemID         string          `json:"PlaylistItemId,omitempty"`
+	PlayMethod             string          `json:"PlayMethod"` // "DirectPlay" | "Transcode"
+	LiveStreamID           string          `json:"LiveStreamId,omitempty"`
+	CanSeek                bool            `json:"CanSeek"`
+	IsPaused               bool            `json:"IsPaused"`
+	IsMuted                bool            `json:"IsMuted"`
+	VolumeLevel            int             `json:"VolumeLevel"`
+	PositionTicks          int64           `json:"PositionTicks"`
+	PlaybackStartTimeTicks int64           `json:"PlaybackStartTimeTicks"`
+	SubtitleStreamIndex    int             `json:"SubtitleStreamIndex"`
+	AudioStreamIndex       int             `json:"AudioStreamIndex"`
+	RepeatMode             string          `json:"RepeatMode"`
+	BufferedRanges         []BufferedRange `json:"BufferedRanges,omitempty"`
+	NowPlayingQueue        []PlaylistItem  `json:"NowPlayingQueue,omitempty"`
 }
