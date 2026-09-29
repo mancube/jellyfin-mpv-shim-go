@@ -3,11 +3,7 @@
 package ui
 
 import (
-	"bytes"
 	"fmt"
-	"image"
-	"image/color"
-	"image/png"
 	"os"
 	"os/exec"
 	"runtime"
@@ -24,7 +20,7 @@ import (
 func RunTray(s *Session) bool {
 	ready := make(chan struct{})
 	go systray.Run(func() {
-		if icon := trayIcon(); icon != nil {
+		if icon := trayIcon(false); icon != nil {
 			systray.SetIcon(icon)
 		}
 		systray.SetTitle("mpv-shim")
@@ -83,10 +79,16 @@ func RunTray(s *Session) bool {
 func refreshTray(s *Session, status, nowPlaying *systray.MenuItem) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
+	wasOnline := true
 	for range t.C {
+		online := s.WS.Connected()
 		conn := "offline"
-		if s.WS.Connected() {
+		if online {
 			conn = "online"
+		}
+		if online != wasOnline {
+			wasOnline = online
+			setTrayIcon(online)
 		}
 		text := "mpv-shim — " + conn
 		status.SetTitle("Status: " + text)
@@ -125,25 +127,9 @@ func openInFileManager(path string) {
 	}
 }
 
-// trayIcon renders a 22x22 Jellyfin-purple square in memory: a tray icon file
-// would be one more binary asset to ship.
-func trayIcon() []byte {
-	const size = 22
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	accent := color.RGBA{0x00, 0xa4, 0xdc, 0xff}
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			corner := (x+y < 2) || (x+(size-1-y) < 2) || ((size-1-x)+y < 2) || ((size-1-x)+(size-1-y) < 2)
-			if x == 0 || y == 0 || x == size-1 || y == size-1 || corner {
-				img.Set(x, y, color.RGBA{})
-				continue
-			}
-			img.Set(x, y, accent)
-		}
+// setTrayIcon swaps the tray icon (the status dot changes with the socket).
+func setTrayIcon(online bool) {
+	if icon := trayIcon(online); icon != nil {
+		systray.SetIcon(icon)
 	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		return nil
-	}
-	return buf.Bytes()
 }
