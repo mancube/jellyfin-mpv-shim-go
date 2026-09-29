@@ -1,7 +1,13 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -61,4 +67,124 @@ func testAccount(name string) jfin.Account {
 	return jfin.Account{Server: "http://x", Username: name, User: name, AccessToken: "t", UserID: "u", DeviceID: "d"}
 }
 
-func keyMsg(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+// keyMsg builds a KeyMsg for a key *name* ("enter", "tab", ...) or for a
+// single printable rune.
+func keyMsg(s string) tea.KeyMsg {
+	switch s {
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
+	case "tab":
+		return tea.KeyMsg{Type: tea.KeyTab}
+	case "esc":
+		return tea.KeyMsg{Type: tea.KeyEsc}
+	}
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+}
+
+// Regression: keystrokes must reach the focused text field (the wizard used
+// to swallow them, so nothing could be typed).
+func TestSetupTypingIntoFields(t *testing.T) {
+	m := newSetupModel(Deps{Creds: testCreds(), CredPath: t.TempDir() + "/cred.json"})
+	m.scr, m.focus = screenAddPassword, 0
+	m.reset()
+
+	typeStr(&m, "http://x:8096")
+	if got := m.inputs[0].Value(); got != "http://x:8096" {
+		t.Errorf("server field = %q, want http://x:8096", got)
+	}
+	if !strings.Contains(m.View(), "http://x:8096") {
+		t.Errorf("view does not show the typed value:\n%s", m.View())
+	}
+
+	// tab/enter advances to the username field, which then takes the keys;
+	// shift+tab walks back.
+	next, _ := m.Update(keyMsg("tab"))
+	m = next.(setupModel)
+	if m.focus != 1 {
+		t.Fatalf("focus = %d, want 1", m.focus)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = next.(setupModel)
+	if m.focus != 0 {
+		t.Fatalf("shift+tab focus = %d, want 0", m.focus)
+	}
+	next, _ = m.Update(keyMsg("enter"))
+	m = next.(setupModel)
+	if m.focus != 1 {
+		t.Fatalf("focus = %d, want 1", m.focus)
+	}
+	typeStr(&m, "admin")
+	if m.inputs[1].Value() != "admin" {
+		t.Errorf("username field = %q, want admin", m.inputs[1].Value())
+	}
+
+	// The password field is masked.
+	next, _ = m.Update(keyMsg("enter"))
+	m = next.(setupModel)
+	if m.focus != 2 {
+		t.Fatalf("focus = %d, want 2 (password)", m.focus)
+	}
+	typeStr(&m, "hunter2")
+	if m.inputs[2].Value() != "hunter2" {
+		t.Errorf("password field = %q, want hunter2", m.inputs[2].Value())
+	}
+	if v := m.View(); strings.Contains(v, "hunter2") {
+		t.Errorf("password is echoed in the view:\n%s", v)
+	}
+}
+
+// typeStr feeds one keystroke per rune through the model's Update.
+func typeStr(m *setupModel, s string) {
+	for _, r := range s {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		*m = next.(setupModel)
+	}
+}
+
+// Full path: type the three fields, press enter, and the account is stored.
+func TestSetupPasswordLoginStoresAccount(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["Username"] != "admin" || body["Pw"] != "s3cret" {
+			w.WriteHeader(400)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(jfin.LoginResponse{
+			AccessToken: "tok", User: jfin.User{ID: "u1", Name: "admin"},
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	credPath := filepath.Join(t.TempDir(), "cred.json")
+	creds := testCreds()
+	m := newSetupModel(Deps{
+		Creds: creds, CredPath: credPath,
+		NewClient: func(server string) *jfin.Client {
+			return jfin.New(server, "dev", "d1", "1.0", false)
+		},
+	})
+	m.scr, m.focus = screenAddPassword, 0
+	m.reset()
+	typeStr(&m, ts.URL)
+	next, _ := m.Update(keyMsg("tab"))
+	m = next.(setupModel)
+	typeStr(&m, "admin")
+	next, _ = m.Update(keyMsg("tab"))
+	m = next.(setupModel)
+	typeStr(&m, "s3cret")
+	next, _ = m.Update(keyMsg("enter")) // submit
+	m = next.(setupModel)
+
+	if m.scr != screenList {
+		t.Errorf("screen = %v, want the account list (err: %s)", m.scr, m.err)
+	}
+	if len(creds.Accounts) != 1 || creds.Accounts[0].AccessToken != "tok" {
+		t.Fatalf("stored accounts = %+v", creds.Accounts)
+	}
+	if _, err := os.Stat(credPath); err != nil {
+		t.Errorf("credentials not written: %v", err)
+	}
+}

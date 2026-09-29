@@ -52,10 +52,12 @@ func newSetupModel(d Deps) setupModel {
 		ti.Placeholder = ph
 		return ti
 	}
+	pass := mk("password")
+	pass.EchoMode = textinput.EchoPassword
 	m := setupModel{deps: d, inputs: []textinput.Model{
 		mk("https://jellyfin.example.com"),
 		mk("username"),
-		mk("password"),
+		pass,
 	}}
 	m.inputs[0].Focus()
 	return m
@@ -66,12 +68,27 @@ func (m setupModel) Init() tea.Cmd { return nil }
 func (m setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// In an input screen the focused field owns the keystroke first;
+		// only the control keys are handled here.
+		if m.scr == screenAddPassword || m.scr == screenAddQuickConnect {
+			if m.focus < len(m.inputs) {
+				var cmd tea.Cmd
+				m.inputs[m.focus], cmd = m.inputs[m.focus].Update(msg)
+				if !isControlKey(msg) {
+					return m, cmd
+				}
+			}
+		}
 		switch msg.String() {
-		case "ctrl+c", "q", "esc":
+		case "ctrl+c":
+			return m, tea.Quit
+		case "q", "esc":
 			if m.scr == screenList {
 				return m, tea.Quit
 			}
-			m.scr, m.err = screenList, ""
+			if m.scr != screenQuickCode { // a pending Quick Connect keeps polling
+				m.scr, m.err = screenList, ""
+			}
 		case "up", "k":
 			if m.scr == screenList && len(m.deps.Creds.Accounts) > 0 {
 				m.sel = (m.sel - 1 + len(m.deps.Creds.Accounts)) % len(m.deps.Creds.Accounts)
@@ -97,7 +114,11 @@ func (m setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scr, m.focus, m.err = screenAddQuickConnect, 0, ""
 				m.reset()
 			}
-		case "tab", "enter":
+		case "tab":
+			return m.moveFocus(1)
+		case "shift+tab":
+			return m.moveFocus(-1)
+		case "enter":
 			return m.onEnter()
 		}
 	case quickPollMsg:
@@ -108,6 +129,22 @@ func (m setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tick()
 	}
+	return m, nil
+}
+
+// moveFocus moves the field cursor (tab / shift+tab).
+func (m setupModel) moveFocus(delta int) (tea.Model, tea.Cmd) {
+	m.focus += delta
+	if m.focus < 0 {
+		m.focus = 0
+	}
+	if m.focus >= len(m.inputs) {
+		m.focus = len(m.inputs) - 1
+	}
+	for i := range m.inputs {
+		m.inputs[i].Blur()
+	}
+	m.inputs[m.focus].Focus()
 	return m, nil
 }
 
@@ -126,12 +163,7 @@ func (m setupModel) onEnter() (tea.Model, tea.Cmd) {
 	case screenAddPassword:
 		switch m.focus {
 		case 0, 1:
-			m.focus++
-			for i := range m.inputs {
-				m.inputs[i].Blur()
-			}
-			m.inputs[m.focus].Focus()
-			return m, nil
+			return m.moveFocus(1)
 		default:
 			server := strings.TrimRight(strings.TrimSpace(m.inputs[0].Value()), "/")
 			user := strings.TrimSpace(m.inputs[1].Value())
@@ -219,6 +251,16 @@ func (m *setupModel) store(c *jfin.Client, username, server, display string) {
 	m.scr, m.err, m.qc = screenList, "", nil
 }
 
+// isControlKey reports whether a key drives the wizard rather than the text
+// field (typing must win over our single-letter shortcuts).
+func isControlKey(k tea.KeyMsg) bool {
+	switch k.String() {
+	case "ctrl+c", "enter", "tab", "shift+tab", "esc", "up", "down":
+		return true
+	}
+	return false
+}
+
 func (m setupModel) View() string {
 	var b strings.Builder
 	switch m.scr {
@@ -242,9 +284,13 @@ func (m setupModel) View() string {
 	case screenAddPassword:
 		labels := []string{"Server", "Username", "Password"}
 		for i, ti := range m.inputs {
-			b.WriteString(fmt.Sprintf("%s: %s\n", labels[i], ti.View()))
+			marker := "  "
+			if i == m.focus {
+				marker = "> "
+			}
+			b.WriteString(fmt.Sprintf("%s%s: %s\n", marker, labels[i], ti.View()))
 		}
-		b.WriteString("\ntab/enter next   esc back\n")
+		b.WriteString("\ntab/enter next   shift+tab back   esc back\n")
 	case screenAddQuickConnect:
 		b.WriteString(fmt.Sprintf("Server: %s\n", m.inputs[0].View()))
 		b.WriteString("\nenter start Quick Connect   esc back\n")
