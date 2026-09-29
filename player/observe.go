@@ -124,6 +124,7 @@ func (p *Player) onPropertyChange(prop string, data json.RawMessage) {
 			return
 		}
 		p.lastMute = v
+		recordVolume(int(p.repVolume), v)
 	case "volume":
 		var v float64
 		if json.Unmarshal(data, &v) != nil {
@@ -132,7 +133,7 @@ func (p *Player) onPropertyChange(prop string, data json.RawMessage) {
 		if int(v) == int(p.repVolume) {
 			return
 		}
-		rememberVolume(int(v))
+		recordVolume(int(v), p.lastMute)
 	case "seeking":
 		// Report when the seek finished (value false) — that is the new
 		// position the UI should show, not the drag in progress.

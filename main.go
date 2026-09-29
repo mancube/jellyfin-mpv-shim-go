@@ -234,7 +234,7 @@ type session struct {
 	mu     sync.Mutex // guards cancel (start/disconnect)
 	cancel context.CancelFunc
 
-	flushVolume func() // persist a pending volume change at shutdown
+	commitVolume func() // persist a pending volume change at shutdown
 }
 
 // newSession wires the client, mpv, player and WS event handlers.
@@ -280,59 +280,48 @@ func mediaConfigLocked(s *Settings) jfin.MediaConfig {
 	}
 }
 
-// volumeGetter returns the volume to restore at the next playback start, or 0.
-// Reads under settingsMu: the preference menu can flip the toggle.
-func volumeGetter(s *Settings) func() int {
-	return func() int {
-		settingsMu.Lock()
-		defer settingsMu.Unlock()
-		if !s.RememberVolume {
-			return 0
-		}
-		return s.LastVolume
-	}
-}
-
-// volumeSetter remembers a new volume. Writes are coalesced: a slider drag
-// produces many events and config.json is only rewritten every few seconds
-// (plus once on shutdown).
-func volumeSetter(s *Settings, cfgPath string, lg *log.Logger) (set func(int), flush func()) {
+// volumeMemory installs the app side of "remember volume and mute": reading the
+// state to restore, recording changes in memory, and persisting them only when
+// the player asks (end of playback, mpv going away, app exit).
+func volumeMemory(s *Settings, cfgPath string, lg *log.Logger) player.VolumeMemory {
 	var (
-		mu      sync.Mutex
-		pending int
-		dirty   bool
+		mu    sync.Mutex
+		state player.VolumeState
 	)
-	flush = func() {
-		mu.Lock()
-		vol, ok := pending, dirty
-		pending, dirty = 0, false
-		mu.Unlock()
-		if !ok {
-			return
-		}
-		settingsMu.Lock()
-		s.LastVolume = vol
-		err := s.Save(cfgPath)
-		settingsMu.Unlock()
-		if err != nil {
-			lg.Printf("saving volume: %v", err)
-		}
+	return player.VolumeMemory{
+		Get: func() player.VolumeState {
+			settingsMu.Lock()
+			defer settingsMu.Unlock()
+			if !s.RememberVolume {
+				return player.VolumeState{}
+			}
+			return player.VolumeState{Volume: s.LastVolume, Mute: s.LastMuted}
+		},
+		Record: func(v player.VolumeState) {
+			mu.Lock()
+			state = v
+			mu.Unlock()
+		},
+		Commit: func() {
+			mu.Lock()
+			v, ok := state, state.Volume > 0
+			mu.Unlock()
+			if !ok {
+				return // nothing worth writing yet
+			}
+			settingsMu.Lock()
+			if s.LastVolume == v.Volume && s.LastMuted == v.Mute {
+				settingsMu.Unlock()
+				return // nothing changed since the last write
+			}
+			s.LastVolume, s.LastMuted = v.Volume, v.Mute
+			err := s.Save(cfgPath)
+			settingsMu.Unlock()
+			if err != nil {
+				lg.Printf("saving volume: %v", err)
+			}
+		},
 	}
-	go func() {
-		t := time.NewTicker(5 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			flush()
-		}
-	}()
-	return func(vol int) {
-		if vol < 0 || vol > 100 {
-			return
-		}
-		mu.Lock()
-		pending, dirty = vol, true
-		mu.Unlock()
-	}, flush
 }
 
 // applyAndSave persists a preference-menu change atomically.
@@ -422,8 +411,8 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	})
 	pl := player.New(proc, lg)
 	pl.SetOptions(playerOptions(s))
-	setVolume, flushVolume := volumeSetter(s, cfgPath, lg)
-	pl.SetVolumeMemory(volumeGetter(s), setVolume)
+	volMem := volumeMemory(s, cfgPath, lg)
+	pl.SetVolumeMemory(volMem)
 	pl.SetVersion(version)
 	// Our own release feed, never upstream's: this is the Go rewrite and must
 	// not report the Python shim's versions. Override with `update_url`.
@@ -518,7 +507,7 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 
 	return &session{
 		account: a, client: client, proc: proc, pl: pl, ws: ws, logs: logs,
-		ipcDir: ipcDir, lg: lg, flushVolume: flushVolume,
+		ipcDir: ipcDir, lg: lg, commitVolume: volMem.Commit,
 	}, nil
 }
 
@@ -562,8 +551,8 @@ func (sess *session) connected() bool { return sess.ws.Connected() }
 // shutdown is the app-exit path: stop the socket loop, tear playback down and
 // kill mpv (upstream mpv_shim.py shutdown order).
 func (sess *session) shutdown(ctx context.Context) {
-	if sess.flushVolume != nil {
-		sess.flushVolume() // do not lose the last volume change
+	if sess.commitVolume != nil {
+		sess.commitVolume() // app exit: persist a pending change
 	}
 	sess.disconnect()
 	sess.pl.Shutdown()

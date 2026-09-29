@@ -1744,54 +1744,85 @@ func replay(t *testing.T, h *harness) {
 	}
 }
 
-// Volume memory: the remembered volume is applied to a new playback, changes
-// are reported back, and switching the setting off stops both.
-func TestRememberVolume(t *testing.T) {
+// Volume memory: volume *and* mute are restored on the next playback, changes
+// are only recorded (no disk I/O) until Commit — which happens when playback
+// ends, mpv goes away or the app exits.
+func TestRememberVolumeAndMute(t *testing.T) {
 	h := setup(t)
 	// The callback runs on the event-loop goroutine; guard the test's copy.
 	var mu sync.Mutex
-	var remembered, last int
-	h.pl.SetVolumeMemory(
-		func() int { mu.Lock(); defer mu.Unlock(); return remembered },
-		func(v int) { mu.Lock(); last = v; mu.Unlock() },
-	)
-	lastSeen := func() int { mu.Lock(); defer mu.Unlock(); return last }
-	setRemembered := func(v int) { mu.Lock(); remembered = v; mu.Unlock() }
+	var remembered, recorded VolumeState
+	commits := 0
+	mem := VolumeMemory{
+		Get:    func() VolumeState { mu.Lock(); defer mu.Unlock(); return remembered },
+		Record: func(v VolumeState) { mu.Lock(); recorded = v; mu.Unlock() },
+		Commit: func() { mu.Lock(); commits++; mu.Unlock() },
+	}
+	h.pl.SetVolumeMemory(mem)
+	seen := func() VolumeState { mu.Lock(); defer mu.Unlock(); return recorded }
+	commitsSeen := func() int { mu.Lock(); defer mu.Unlock(); return commits }
+	setRemembered := func(v VolumeState) { mu.Lock(); remembered = v; mu.Unlock() }
 
-	// Nothing remembered yet: mpv keeps its own volume.
+	// Nothing remembered yet: mpv keeps its own values.
 	playOne(t, h, cfg())
 	if h.fm.prop("volume") != nil {
 		t.Errorf("volume set without a remembered value: %v", h.fm.prop("volume"))
 	}
 
-	// A remote volume change is reported to the app.
+	// A remote change is recorded, not committed.
 	h.fm.SetProperty("volume", 100.0)
 	h.pl.SetVolume(35)
-	if got := lastSeen(); got != 35 {
-		t.Errorf("reported volume = %d, want 35", got)
+	if got := seen(); got.Volume != 35 {
+		t.Errorf("recorded volume = %d, want 35", got.Volume)
+	}
+	if commitsSeen() != 0 {
+		t.Error("a volume change wrote to disk (commit called)")
+	}
+	h.pl.SetMute(true)
+	if got := seen(); !got.Mute {
+		t.Error("mute change was not recorded")
+	}
+	if commitsSeen() != 0 {
+		t.Error("a mute change wrote to disk (commit called)")
 	}
 
-	// The next playback restores it.
-	setRemembered(35)
+	// Stopping playback (the first logical event) commits exactly once.
+	h.pl.Stop()
+	if commitsSeen() != 1 {
+		t.Errorf("commits after stop = %d, want 1", commitsSeen())
+	}
+
+	// The next playback restores both values.
+	setRemembered(VolumeState{Volume: 35, Mute: true})
 	replay(t, h)
 	if got := h.fm.prop("volume"); got != float64(35) {
 		t.Errorf("restored volume = %v, want 35", got)
 	}
+	if got := h.fm.prop("mute"); got != true {
+		t.Errorf("restored mute = %v, want true", got)
+	}
 
-	// A change made inside mpv (OSC / keymap) is remembered too. The first
-	// event after subscribing is mpv's own current-value echo, so send it.
+	// A change made inside mpv (OSC / keymap) is recorded too. The first event
+	// per property is mpv's own subscribe echo, so send it.
 	h.fm.changeProp("volume", 35.0)
 	h.fm.changeProp("volume", 70.0)
-	waitFor(t, "mpv-side volume change reported", func() bool { return lastSeen() == 70 })
+	waitFor(t, "mpv-side volume change recorded", func() bool { return seen().Volume == 70 })
 
-	// With the setting off, nothing is restored.
+	// With the setting off, nothing is restored: mpv keeps whatever it has
+	// (mpv itself carries volume/mute across files, which is what we want to
+	// observe here).
+	h.fm.SetProperty("volume", 88.0)
+	h.fm.SetProperty("mute", false)
 	o := h.pl.Options()
 	o.RememberVolume = false
 	h.pl.SetOptions(o)
-	setRemembered(20)
+	setRemembered(VolumeState{Volume: 20, Mute: true})
 	replay(t, h)
-	if got := h.fm.prop("volume"); got == float64(20) {
-		t.Error("volume restored although remember_volume is off")
+	if got := h.fm.prop("volume"); got != 88.0 {
+		t.Errorf("volume changed although remember_volume is off: %v", got)
+	}
+	if got := h.fm.prop("mute"); got == true {
+		t.Error("mute restored although remember_volume is off")
 	}
 }
 

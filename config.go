@@ -33,10 +33,13 @@ type Settings struct {
 	LogLevel      string `json:"log_level"`
 	WriteLog      bool   `json:"write_log"`
 	MediaKeys     bool   `json:"media_keys"`
-	// RememberVolume restores the last volume used at the next playback start;
-	// LastVolume is the value we remember (written back automatically).
+	// RememberVolume restores the last volume and mute state at the next
+	// playback start. LastVolume/LastMuted are written back automatically — but
+	// only when playback ends, mpv goes away or the app exits, not on every
+	// change.
 	RememberVolume bool `json:"remember_volume"`
 	LastVolume     int  `json:"last_volume,omitempty"`
+	LastMuted      bool `json:"last_muted,omitempty"`
 
 	// --- keybindings (upstream kb_*) ------------------------------------
 	// Each entry maps an mpv key name to a shim action, e.g. {"m": "menu"}.

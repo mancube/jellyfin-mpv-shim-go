@@ -290,7 +290,7 @@ func (p *Player) SetVolume(pct int) {
 		}
 	}
 	p.mpv.SetProperty("volume", pct)
-	rememberVolume(pct)
+	recordVolume(pct, false)
 	p.touchLocked()
 	p.reportLocked()
 }
@@ -299,6 +299,12 @@ func (p *Player) SetVolume(pct int) {
 func (p *Player) GetVolume() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.volumeLocked()
+}
+
+// volumeLocked is GetVolume for callers that already hold p.mu (the mutex is
+// not reentrant).
+func (p *Player) volumeLocked() int {
 	if x, err := p.mpv.GetProperty("volume"); err == nil {
 		if f, ok := x.(float64); ok {
 			return int(f)
@@ -313,6 +319,7 @@ func (p *Player) SetMute(mute bool) {
 	defer p.mu.Unlock()
 	p.mpv.SetProperty("mute", mute)
 	p.lastMute = mute
+	recordVolume(p.volumeLocked(), mute)
 	p.touchLocked()
 	p.reportLocked()
 }

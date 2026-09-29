@@ -451,12 +451,12 @@ func TestSessionDisconnectReconnect(t *testing.T) {
 	}
 }
 
-// The volume memory as wired in main: the remembered value is restored on the
-// next playback and a new volume is written back to config.json.
+// The volume memory as wired in main: the remembered volume/mute are restored
+// on the next playback, and config.json is written only when the player commits
+// (end of playback / mpv exit / app exit) — not on every change.
 func TestVolumeMemoryEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	// A local file the fake server "serves" directly.
 	media := filepath.Join(dir, "movie.mkv")
 	if err := os.WriteFile(media, []byte("not really a movie"), 0o600); err != nil {
 		t.Fatal(err)
@@ -464,55 +464,65 @@ func TestVolumeMemoryEndToEnd(t *testing.T) {
 
 	s := DefaultSettings()
 	s.RememberVolume = true
-	s.LastVolume = 37
+	s.LastVolume, s.LastMuted = 37, true
 	if err := s.Save(cfgPath); err != nil {
 		t.Fatal(err)
 	}
-	// The fake server hands out a File source pointing at our file.
 	ts := playServer(t)
 	c := jfin.New(ts.URL, "dev", "d1", "1", false)
 	c.Token, c.UserID = "tok", "u"
 	lg := log.New(io.Discard, "", 0)
-	setVolume, flushVolume := volumeSetter(&s, cfgPath, lg)
+	mem := volumeMemory(&s, cfgPath, lg)
 	pl := player.New(newMinimalMvp(), lg)
 	pl.SetOptions(playerOptions(&s))
-	pl.SetVolumeMemory(volumeGetter(&s), setVolume)
+	pl.SetVolumeMemory(mem)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	pl.Start(ctx)
 
-	m := &jfin.Media{
-		C: c, Cfg: jfin.MediaConfig{LocalKbps: 10000}, IsLocal: true,
-		Queue: []jfin.PlaylistItem{{PlaylistItemId: "p1", ID: "a"}},
-	}
-	src := jfin.MediaSource{ID: "src1", Protocol: "File", Path: media, SupportsDirectPlay: true}
-	m.Video = &jfin.Video{M: m, ID: "a", Item: &jfin.Item{ID: "a", Name: "M", Type: "Movie"}}
-	if err := pl.Play(m, 0); err != nil {
-		// The fake PlaybackInfo source is HTTP-based; the volume plumbing is
-		// what we are testing, so tolerate the URL failure but keep the flow.
-		t.Logf("play: %v", err)
-	}
-	if got := volumeGetter(&s)(); got != 37 {
-		t.Errorf("volume getter = %d, want 37", got)
+	// The state we would restore.
+	if got := mem.Get(); got.Volume != 37 || !got.Mute {
+		t.Errorf("restored state = %+v, want {37 true}", got)
 	}
 
-	// A new volume is coalesced and written on flush.
-	pl.SetVolume(64)
-	flushVolume()
-	var reread Settings
-	if err := reread.Load(cfgPath); err != nil {
-		t.Fatal(err)
+	read := func() Settings {
+		t.Helper()
+		var r Settings
+		if err := r.Load(cfgPath); err != nil {
+			t.Fatal(err)
+		}
+		return r
 	}
-	if reread.LastVolume != 64 {
-		t.Errorf("last_volume = %d, want 64", reread.LastVolume)
+
+	// A change is recorded but not written: config.json is untouched.
+	mem.Record(player.VolumeState{Volume: 64, Mute: false})
+	if got := read().LastVolume; got != 37 {
+		t.Errorf("config changed without a commit: last_volume = %d", got)
 	}
+
+	// Commit writes once, and is a no-op when nothing changed.
+	mem.Commit()
+	if got := read(); got.LastVolume != 64 || got.LastMuted {
+		t.Errorf("after commit: volume=%d muted=%v, want 64/false", got.LastVolume, got.LastMuted)
+	}
+	before := cfgModTime(t, cfgPath)
+	mem.Commit() // nothing new recorded
+	if cfgModTime(t, cfgPath) != before {
+		t.Error("a commit with no change rewrote the file")
+	}
+
 	// With the toggle off the getter reports nothing to restore.
-	reread.RememberVolume = false
-	if err := reread.Save(cfgPath); err != nil {
+	s.RememberVolume = false
+	if got := mem.Get(); got.Volume != 0 || got.Mute {
+		t.Errorf("getter with remember off = %+v, want empty", got)
+	}
+}
+
+func cfgModTime(t *testing.T, path string) time.Time {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := volumeGetter(&reread)(); got != 0 {
-		t.Errorf("getter with remember off = %d, want 0", got)
-	}
-	_ = src
+	return fi.ModTime()
 }

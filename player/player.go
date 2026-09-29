@@ -371,6 +371,7 @@ func (p *Player) stopLocked() {
 		p.log.Printf("session stopped: %v", err)
 	}
 	p.runShell("stop_cmd", p.opt.ShellCmds.Stop)
+	commitVolume() // playback ended: a good moment to persist the volume state
 }
 
 // InsertQueue adds ids to the queue (PlayNext after current, PlayLast at the
@@ -629,6 +630,7 @@ func (p *Player) handleExit() {
 		if err := v.M.C.SessionStopped(p.ctx, opts); err != nil {
 			p.log.Printf("session stopped (graceful): %v", err)
 		}
+		commitVolume() // mpv is going away
 		return
 	}
 	// Crash: kill -9 / OOM / segfault. Respawn and resume at the last
