@@ -77,6 +77,7 @@ type statusModel struct {
 	deps    Deps
 	setup   *setupModel
 	inSetup bool
+	notice  string // transient one-line feedback ("already connected")
 }
 
 func newStatusModel(s *Session, d Deps) statusModel {
@@ -129,21 +130,23 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit // the TUI leaves; main then stops the session
 		case "r":
-			// r = reconnect when we are offline, otherwise the accounts list
-			// (tray parity: the connection item toggles the same way).
-			if m.s.Connected != nil && !m.s.Connected() {
-				if m.s.Reconnect != nil {
-					m.s.Reconnect()
-				}
+			// r is always "reconnect" — never an alias for something else.
+			if m.online() {
+				m.notice = "already connected"
 				return m, nil
 			}
-			return m.openSetup()
-		case "a", "i", "p":
+			if m.s.Reconnect != nil {
+				m.s.Reconnect()
+				m.notice = "reconnecting…"
+			}
+			return m, nil
+		case "a":
 			return m.openSetup()
 		}
 	case accountsMsg:
 		return m.openSetup()
 	case tickMsg:
+		m.notice = ""
 		return m, tick()
 	}
 	return m, nil
@@ -174,32 +177,43 @@ func (m statusModel) View() string {
 	if m.inSetup {
 		return m.setup.View()
 	}
-	views := []string{m.headerView()}
-	if m.s.Connected != nil && !m.s.Connected() {
-		views = append(views, styWarn.Render("  disconnected — press r or use the tray to reconnect"))
-	}
-	views = append(views, m.nowPlayingView())
+	views := []string{m.headerView(), m.connectionView(), m.nowPlayingView()}
 	if m.s.UpdateNote != nil {
 		if note := m.s.UpdateNote(); note != "" {
 			views = append(views, styWarn.Render("▲ "+note))
 		}
 	}
 	views = append(views, m.logView(), "",
-		hints([2]string{"a", "accounts"}, [2]string{"p", "add account"},
-			[2]string{"r", "reconnect"}, [2]string{"q", "quit"}), "")
+		hints([2]string{"a", "accounts"}, [2]string{"r", "reconnect"},
+			[2]string{"q", "quit"}), "")
 	return strings.Join(views, "\n")
 }
 
-func (m statusModel) headerView() string {
-	conn := styBad.Render("● offline")
-	switch m.s.WS.State() {
-	case jfin.StateConnected:
-		conn = styOK.Render("● online")
-	case jfin.StateReconnecting:
-		conn = styWarn.Render("● reconnecting")
+// online reports whether the socket is up right now.
+func (m statusModel) online() bool {
+	return m.s.WS != nil && m.s.WS.State() == jfin.StateConnected
+}
+
+// connectionView is the single place that explains the connection state, so the
+// header dot and this line can never disagree.
+func (m statusModel) connectionView() string {
+	var text string
+	switch {
+	case m.online():
+		text = styOK.Render("● connected") + styDim.Render("  — ready to cast")
+	case m.s.WS != nil && m.s.WS.State() == jfin.StateReconnecting:
+		text = styWarn.Render("● reconnecting") + styDim.Render("  — retrying, r to retry now")
+	default:
+		text = styBad.Render("● offline") + styDim.Render("  — r to reconnect, check the server")
 	}
-	line := conn + styDim.Render("   "+clip(m.s.Account.Server, 44)) +
-		styDim.Render("  ·  ") + clip(m.s.Account.Username, 20)
+	if m.notice != "" {
+		text += styDim.Render("   (" + m.notice + ")")
+	}
+	return text
+}
+
+func (m statusModel) headerView() string {
+	line := clip(m.s.Account.Server, 44) + styDim.Render("  ·  ") + clip(m.s.Account.Username, 20)
 	right := styDim.Render(clip(m.s.Account.DeviceID, 8))
 	gap := 58 - lipgloss.Width(line) - lipgloss.Width(right)
 	if gap < 1 {

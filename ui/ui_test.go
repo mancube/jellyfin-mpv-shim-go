@@ -3,6 +3,8 @@ package ui
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -299,37 +301,53 @@ func clickConnection(s *Session) {
 	}
 }
 
-// The TUI offers reconnect with `r` only while offline.
+// `r` is always reconnect (never an alias for something else): online it says
+// so, offline it asks the session to dial again. Accounts live behind `a`.
 func TestStatusReconnectKey(t *testing.T) {
 	s := NewSession(jfin.Account{Server: "http://x"}, nil, nil, NewLogRing(4))
+	s.WS = jfin.NewWS(jfin.New("http://127.0.0.1:1", "d", "d", "1", false), log.New(io.Discard, "", 0))
 	connected := true
-	var reconnects, setupOpens int
 	s.Connected = func() bool { return connected }
-	s.Reconnect = func() { reconnects++ }
+	var reconnects int
+	s.Reconnect = func() { reconnects++; connected = true }
 	m := newStatusModel(s, Deps{Creds: testCreds()})
+	// Put the model in the online state.
+	s.WS.SetState(jfin.StateConnected)
 
-	// Online: r opens the accounts list, it does not reconnect.
+	// Online: r does not reconnect and does not open the accounts list.
 	next, _ := m.Update(keyMsg("r"))
 	m = next.(statusModel)
 	if reconnects != 0 {
-		t.Error("r reconnected while online")
+		t.Errorf("r reconnected while online (reconnects=%d)", reconnects)
 	}
-	if !m.inSetup {
-		t.Error("r did not open the accounts list while online")
+	if m.inSetup {
+		t.Error("r opened the accounts list; that is a's job now")
+	}
+	if m.notice == "" {
+		t.Error("r while online gave no feedback")
 	}
 
-	// Offline: r reconnects.
+	// Offline: r reconnects (and the session moves to reconnecting).
+	s.WS.SetState(jfin.StateOffline)
 	connected = false
-	m.inSetup = false
-	setupOpens = 0
-	_ = setupOpens
 	next, _ = m.Update(keyMsg("r"))
 	m = next.(statusModel)
 	if reconnects != 1 {
 		t.Errorf("r did not reconnect while offline (reconnects=%d)", reconnects)
 	}
-	if m.inSetup {
-		t.Error("r opened the wizard instead of reconnecting")
+
+	// The connection line names the state; nothing else claims to.
+	s.WS.SetState(jfin.StateReconnecting)
+	for _, want := range []string{"connected", "reconnecting", "offline"} {
+		state := map[string]int32{
+			"connected":    jfin.StateConnected,
+			"reconnecting": jfin.StateReconnecting,
+			"offline":      jfin.StateOffline,
+		}[want]
+		s.WS.SetState(state)
+		if v := stripANSI(m.connectionView()); !strings.Contains(v, want) {
+			t.Errorf("state %d: connection line = %q, want %q", state, v, want)
+		}
 	}
 }
 

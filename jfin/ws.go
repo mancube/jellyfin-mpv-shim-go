@@ -75,6 +75,10 @@ func (w *WS) Connected() bool { return w.live.Load() }
 // StateConnected). The tray renders it as the status dot.
 func (w *WS) State() int32 { return w.state.Load() }
 
+// SetState overrides the state. It exists for the UI tests; production code
+// drives the state from the connection lifecycle.
+func (w *WS) SetState(s int32) { w.state.Store(s) }
+
 // Run blocks until ctx is canceled, reconnecting forever.
 func (w *WS) Run(ctx context.Context) error {
 	backoff := time.Second
