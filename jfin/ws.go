@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,7 +31,9 @@ type WS struct {
 	log      *log.Logger
 	handlers map[string]WSHandler
 	seen     map[string]struct{}
-	live     atomic.Bool // true while a socket is up (for the TUI/tray)
+	ignMu    sync.Mutex     // guards ignored
+	ignored  map[string]int // per-type count of messages we do not act on
+	live     atomic.Bool    // true while a socket is up (for the TUI/tray)
 
 	// HealthInterval is the /Sessions poll period (0 disables).
 	HealthInterval time.Duration
@@ -43,6 +46,7 @@ func NewWS(c *Client, logger *log.Logger) *WS {
 		log:            logger,
 		handlers:       map[string]WSHandler{},
 		seen:           map[string]struct{}{},
+		ignored:        map[string]int{},
 		HealthInterval: 300 * time.Second,
 	}
 }
@@ -192,15 +196,41 @@ func (w *WS) readLoop(ctx context.Context, conn *websocket.Conn) {
 		case "KeepAlive":
 			// Server heartbeat broadcast; the client→server KeepAlive we send
 			// (driven by ForceKeepAlive) is what the server monitors. Same as
-			// apiclient: log and ignore.
-			w.log.Printf("ws: KeepAlive")
+			// apiclient: ignore.
+			w.ignore("KeepAlive")
 		default:
 			if h := w.handlers[msg.MessageType]; h != nil {
 				h(ctx, msg.Data)
 			} else {
-				w.log.Printf("ws: unhandled message type %q", msg.MessageType)
+				// UserDataChanged, RefreshProgress, SessionUpdate… the server
+				// sends these on every web-UI interaction; upstream only
+				// debug-logs them. Log the first of each type, then a count
+				// every 50, so the log (and the TUI) stay readable.
+				w.ignore(msg.MessageType)
 			}
 		}
+	}
+}
+
+// ignoredCount is a test/debug accessor for the ignore counters.
+func (w *WS) ignoredCount(msgType string) int {
+	w.ignMu.Lock()
+	defer w.ignMu.Unlock()
+	return w.ignored[msgType]
+}
+
+// ignore records a message we deliberately do not act on, logging the first
+// occurrence of each type and then every 50th.
+func (w *WS) ignore(msgType string) {
+	w.ignMu.Lock()
+	n := w.ignored[msgType] + 1
+	w.ignored[msgType] = n
+	w.ignMu.Unlock()
+	switch {
+	case n == 1:
+		w.log.Printf("ws: ignoring %s messages", msgType)
+	case n%50 == 0:
+		w.log.Printf("ws: ignored %d %s messages", n, msgType)
 	}
 }
 

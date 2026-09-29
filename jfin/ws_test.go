@@ -1,12 +1,14 @@
 package jfin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -153,5 +155,70 @@ func TestWSHealthCheckForcesReconnect(t *testing.T) {
 			t.Fatalf("dials=%d, want >=2 (health-check reconnect)", dials.Load())
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The server sends UserDataChanged/RefreshProgress/… on every web-UI action.
+// They must be ignored quietly: one line per type, then a count every 50.
+func TestWSIgnoresUnactedMessagesQuietly(t *testing.T) {
+	var logBuf bytes.Buffer
+	lg := log.New(&logBuf, "", 0)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Sessions/Capabilities/Full", "/Sessions":
+			_, _ = w.Write([]byte(`[]`))
+		case "/socket":
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close(websocket.StatusNormalClosure, "")
+			ctx := r.Context()
+			for i := 0; i < 3; i++ {
+				_ = conn.Write(ctx, websocket.MessageText,
+					[]byte(`{"MessageType":"UserDataChanged","Data":{"EnableUserData":true}}`))
+			}
+			for i := 0; i < 120; i++ {
+				_ = conn.Write(ctx, websocket.MessageText, []byte(`{"MessageType":"KeepAlive"}`))
+			}
+			for {
+				if _, _, err := conn.Read(ctx); err != nil {
+					return
+				}
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "d", "dev-1", "1", false)
+	ws := NewWS(c, lg)
+	ws.HealthInterval = time.Hour // disabled for this test
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = ws.Run(ctx); close(done) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for ws.ignoredCount("KeepAlive") < 120 {
+		if time.Now().After(deadline) {
+			t.Fatalf("keepalives not received: %d\nlog:\n%s", ws.ignoredCount("KeepAlive"), logBuf.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	out := logBuf.String()
+	if n := strings.Count(out, "ignoring UserDataChanged"); n != 1 {
+		t.Errorf("UserDataChanged logged %d times, want 1:\n%s", n, out)
+	}
+	if strings.Contains(out, "unhandled") {
+		t.Errorf("unhandled message type still logged:\n%s", out)
+	}
+	// 120 keepalives → 1 first-time line + summaries at 50 and 100.
+	if got := strings.Count(out, "ignored 50 KeepAlive") + strings.Count(out, "ignored 100 KeepAlive"); got != 2 {
+		t.Errorf("keepalive summaries = %d, want 2:\n%s", got, out)
 	}
 }
