@@ -20,9 +20,6 @@ func decodeIcon(t *testing.T, state int32) image.Image {
 	if err != nil {
 		t.Fatalf("decode icon: %v", err)
 	}
-	if got := img.Bounds().Dx(); got != 16 {
-		t.Errorf("icon width = %d, want 16 (upstream's systray.png)", got)
-	}
 	return img
 }
 
@@ -31,48 +28,71 @@ func at(img image.Image, x, y int) (r, g, b, a uint32) {
 	return rr >> 8, gg >> 8, bb >> 8, aa >> 8
 }
 
-// The icon is upstream's artwork untouched; only the status dot in the bottom
-// -right corner changes, and it has one colour per connection state.
-func TestTrayIconIsUpstreamArtworkPlusStatusDot(t *testing.T) {
-	upstream, err := png.Decode(bytes.NewReader(upstreamIcon))
-	if err != nil {
-		t.Fatal(err)
+// The icon must be high resolution: KDE panels are 22–32 px (44 on HiDPI) and
+// a 16 px source is what looked like an 8-bit blur.
+func TestTrayIconIsHighResolution(t *testing.T) {
+	for _, state := range []int32{jfin.StateOffline, jfin.StateReconnecting, jfin.StateConnected} {
+		img := decodeIcon(t, state)
+		w := img.Bounds().Dx()
+		if w < 64 {
+			t.Errorf("icon width = %d, want >= 64 (panel-size independent)", w)
+		}
+		if w != img.Bounds().Dy() {
+			t.Errorf("icon is not square: %v", img.Bounds())
+		}
+	}
+}
+
+// The artwork is the project's own icon, untouched; only the status dot is
+// drawn on top, and it is big enough to see after the panel downscales it.
+func TestTrayIconArtworkPlusStatusDot(t *testing.T) {
+	base := baseIcon(0)
+	if base == nil {
+		t.Fatal("no embedded artwork")
 	}
 	online := decodeIcon(t, jfin.StateConnected)
 	offline := decodeIcon(t, jfin.StateOffline)
 	reconnecting := decodeIcon(t, jfin.StateReconnecting)
 
-	// Everything outside the dot is byte-identical to the original artwork…
-	for y := 0; y < 16; y++ {
-		for x := 0; x < 16; x++ {
-			if x >= 13 && y >= 13 {
-				continue // the dot
-			}
-			ur, ug, ub, ua := at(upstream, x, y)
-			ir, ig, ib, ia := at(online, x, y)
-			if ur != ir || ug != ig || ub != ib || ua != ia {
-				t.Fatalf("pixel (%d,%d) was recoloured: upstream rgba(%d,%d,%d,%d), icon rgba(%d,%d,%d,%d)",
-					x, y, ur, ug, ub, ua, ir, ig, ib, ia)
-			}
+	// The dot is a circle of ~1/9 of the width, sitting in the corner; sample
+	// its centre and require the surrounding artwork to be untouched.
+	b := base.Bounds()
+	size := b.Dx()
+	dotR := size / 9
+	cx, cy := b.Max.X-dotR-2, b.Max.Y-dotR-2
+
+	// Inside the dot: opaque and one of our colours.
+	r, g, bl, a := at(online, cx, cy)
+	if a < 250 {
+		t.Errorf("dot centre is not opaque: alpha=%d", a)
+	}
+	if g <= r || g <= bl {
+		t.Errorf("connected dot is not green at centre: rgb(%d,%d,%d)", r, g, bl)
+	}
+
+	// Far from the dot: identical to the base artwork.
+	for _, p := range [][2]int{{0, 0}, {size / 2, 0}, {0, size / 2}, {size / 2, size / 2}, {size / 3, size / 3}} {
+		br, bg, bb, ba := at(base, p[0], p[1])
+		ir, ig, ib, ia := at(online, p[0], p[1])
+		if br != ir || bg != ig || bb != ib || ba != ia {
+			t.Errorf("artwork pixel %v was recoloured: base rgba(%d,%d,%d,%d) icon rgba(%d,%d,%d,%d)",
+				p, br, bg, bb, ba, ir, ig, ib, ia)
 		}
 	}
 
-	// …and the dot differs per state: green / amber / grey.
+	// Distinct colours per state.
 	col := func(img image.Image) [3]uint32 {
-		r, g, b, _ := at(img, 15, 15)
-		return [3]uint32{r, g, b}
+		r, g, bb, _ := at(img, cx, cy)
+		return [3]uint32{r, g, bb}
 	}
 	cOn, cOff, cRecon := col(online), col(offline), col(reconnecting)
 	if cOn == cOff || cOn == cRecon || cOff == cRecon {
 		t.Errorf("dot colours are not distinct: on=%v off=%v reconnecting=%v", cOn, cOff, cRecon)
 	}
-	if g := cOn[1]; g <= cOn[0] || g <= cOn[2] {
-		t.Errorf("connected dot is not green: %v", cOn)
-	}
-	if r, g, b := cRecon[0], cRecon[1], cRecon[2]; !(r > g && g > b) { // amber: red > green > blue
+	if r, g, b := cRecon[0], cRecon[1], cRecon[2]; !(r > g && g > b) { // amber
 		t.Errorf("reconnecting dot is not amber: %v", cRecon)
 	}
-	if cOff[0] != cOff[1] || cOff[1] != cOff[2] {
+	if cOff[0] != cOff[1] || cOff[1] != cOff[2] { // grey
 		t.Errorf("offline dot is not grey: %v", cOff)
 	}
 }
@@ -96,6 +116,31 @@ func TestPNGToICO(t *testing.T) {
 	}
 	if _, err := png.Decode(bytes.NewReader(ico[22:])); err != nil {
 		t.Errorf("ICO payload is not a PNG: %v", err)
+	}
+}
+
+// Smaller source sizes must be supported (some panels/theme prefer them) and
+// stay square and non-empty.
+func TestTrayIconSizes(t *testing.T) {
+	for _, size := range []int{0, 32, 64, 128} {
+		img := decodeIcon(t, jfin.StateConnected)
+		if size != 0 {
+			b := trayIconSize(jfin.StateConnected, size)
+			if len(b) == 0 {
+				t.Fatalf("trayIconSize(%d) returned nothing", size)
+			}
+			small, err := png.Decode(bytes.NewReader(b))
+			if err != nil {
+				t.Fatalf("decode size %d: %v", size, err)
+			}
+			if small.Bounds().Dx() != size {
+				t.Errorf("trayIconSize(%d) produced %v", size, small.Bounds())
+			}
+			img = small
+		}
+		if img.Bounds().Dx() < 32 {
+			t.Errorf("size %d: icon too small: %v", size, img.Bounds())
+		}
 	}
 }
 
