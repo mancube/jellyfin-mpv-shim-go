@@ -234,3 +234,32 @@ func stripANSI(s string) string {
 	}
 	return out.String()
 }
+
+// The tray's "Configure Servers…" click must land the user in the wizard.
+func TestTrayRequestOpensAccountWizard(t *testing.T) {
+	creds := testCreds()
+	deps := Deps{Creds: creds, CredPath: t.TempDir() + "/cred.json"}
+	m := newStatusModel(&Session{accounts: make(chan struct{}, 1)}, deps)
+
+	m.s.RequestAccounts()
+	next, cmd := m.Update(accountsMsg{})
+	m = next.(statusModel)
+	if !m.inSetup || m.setup == nil {
+		t.Fatal("tray request did not open the account wizard")
+	}
+	if cmd == nil {
+		t.Error("expected a command (keep listening for tray clicks)")
+	}
+	// The wizard renders the account list.
+	if v := m.View(); !strings.Contains(v, "accounts") {
+		t.Errorf("wizard view = %q", stripANSI(v))
+	}
+}
+
+// RequestAccounts must not block when nobody is listening.
+func TestRequestAccountsNonBlocking(t *testing.T) {
+	s := NewSession(jfin.Account{}, nil, nil, nil)
+	s.RequestAccounts() // no TUI attached: must return immediately
+	s.RequestAccounts()
+	s.RequestAccounts()
+}

@@ -353,10 +353,20 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 	}
 
 	quitOnce := sync.Once{}
-	uiSess := &ui.Session{
-		Account: a, WS: sess.ws, Player: sess.pl, Logs: ring,
-		Quit: func() { quitOnce.Do(func() { stop() }) },
+	uiSess := ui.NewSession(a, sess.ws, sess.pl, ring)
+	uiSess.ConfigDir = cfgDir
+	if s.WriteLog {
+		uiSess.LogPath = filepath.Join(cfgDir, "mpv-shim.log")
 	}
+	// The tray's "Player Menu" item opens the in-player OSD menu: the same
+	// script-message the `c` key sends, so both paths share the code.
+	uiSess.OpenOSD = func() {
+		if err := sess.proc.Command("script-message", "shim-menu", "menu"); err != nil {
+			lg.Printf("tray: open OSD menu: %v", err)
+		}
+	}
+	uiSess.Quit = func() { quitOnce.Do(func() { stop() }) }
+	uiSess.SetLogf(lg.Printf)
 	if ok := ui.RunTray(uiSess); !ok {
 		lg.Printf("tray: no system tray host found (GNOME needs the AppIndicator extension); the TUI is the full surface")
 	}

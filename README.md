@@ -25,6 +25,10 @@ mpv-shim accounts rm 0                                   # remove account by ind
 mpv-shim -status                                         # connection check and exit
 ```
 
+The tray icon carries the same menu as upstream: status and now-playing lines,
+"Configure Servers…" (the TUI wizard), "Player Menu (OSD)", "Open Config
+Folder", "Open Log File" (when `write_log` is on) and Quit.
+
 In the player window: `c` opens the OSD menu (audio/subtitles), arrows seek,
 `SPACE` pauses, `f` fullscreen, `q` stops, `<`/`>` previous/next.
 

@@ -12,15 +12,51 @@ import (
 	"mpv-shim/player"
 )
 
-// Session is what the status screen shows. main passes the live objects; the
-// model only reads them.
+// Session is what the status screen and the tray show. main passes the live
+// objects; they only read from it.
 type Session struct {
 	Account jfin.Account
 	WS      *jfin.WS
 	Player  *player.Player
 	Logs    *LogRing
+	// ConfigDir and LogPath back the tray's "open folder/log" items.
+	ConfigDir string
+	LogPath   string
+	// OpenOSD opens the in-player OSD menu (the tray's "Player Menu" item).
+	OpenOSD func()
 	// Quit stops the whole app (the tray uses it too).
 	Quit func()
+
+	accounts chan struct{} // tray → TUI: open the account wizard
+	logf     func(string, ...any)
+}
+
+// RequestAccounts asks the TUI to show the account wizard (tray item).
+func (s *Session) RequestAccounts() {
+	if s.accounts == nil {
+		return
+	}
+	select {
+	case s.accounts <- struct{}{}:
+	default: // already pending
+	}
+}
+
+// SetLogf lets the tray log through the app logger.
+func (s *Session) SetLogf(f func(string, ...any)) { s.logf = f }
+
+func (s *Session) Logf(format string, args ...any) {
+	if s.logf != nil {
+		s.logf(format, args...)
+	}
+}
+
+// accountsMsg is delivered when the tray asks for the account wizard.
+type accountsMsg struct{}
+
+// NewSession builds a Session with its tray channels set up.
+func NewSession(a jfin.Account, ws *jfin.WS, pl *player.Player, logs *LogRing) *Session {
+	return &Session{Account: a, WS: ws, Player: pl, Logs: logs, accounts: make(chan struct{}, 1)}
 }
 
 type statusModel struct {
@@ -34,7 +70,18 @@ func newStatusModel(s *Session, d Deps) statusModel {
 	return statusModel{s: s, deps: d}
 }
 
-func (m statusModel) Init() tea.Cmd { return tick() }
+func (m statusModel) Init() tea.Cmd { return tea.Batch(tick(), waitAccounts(m.s)) }
+
+// waitAccounts turns a tray "Configure Servers…" click into a message.
+func waitAccounts(s *Session) tea.Cmd {
+	return func() tea.Msg {
+		if s.accounts == nil {
+			return nil
+		}
+		<-s.accounts
+		return accountsMsg{}
+	}
+}
 
 func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -46,15 +93,25 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "a", "r", "i", "p":
-			sm := newSetupModel(m.deps)
-			m.setup = &sm
-			m.inSetup = true
-			return m, m.setup.Init()
+			return m.openSetup()
 		}
+	case accountsMsg:
+		return m.openSetup()
 	case tickMsg:
 		return m, tick()
 	}
 	return m, nil
+}
+
+// openSetup switches to the account wizard (keys or tray) and keeps watching
+// for further tray clicks.
+func (m statusModel) openSetup() (tea.Model, tea.Cmd) {
+	if m.setup == nil {
+		sm := newSetupModel(m.deps)
+		m.setup = &sm
+	}
+	m.inSetup = true
+	return m, tea.Batch(m.setup.Init(), waitAccounts(m.s))
 }
 
 func (m statusModel) View() string {
