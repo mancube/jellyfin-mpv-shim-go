@@ -141,12 +141,11 @@ func (p *Player) touchLocked() { p.lastActivity = time.Now() }
 
 // idleCheckLocked implements the idle stop. Called from Tick.
 func (p *Player) idleCheckLocked() {
-	if p.idleStop <= 0 || p.stopping {
-		return
+	if p.idleStop <= 0 || p.stopping || p.media == nil {
+		return // nothing loaded: there is no playback to stop
 	}
-	active := p.media != nil && !p.aborted() && !p.lastPause
-	if active {
-		p.touchLocked()
+	if !p.aborted() && !p.lastPause {
+		p.touchLocked() // playing: not idle
 		return
 	}
 	if time.Since(p.lastActivity) < p.idleStop {
