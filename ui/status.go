@@ -256,7 +256,10 @@ func RunStatus(s *Session, d Deps, onStart func()) error {
 		tea.WithInput(os.Stdin),   // never fall back to opening /dev/tty: with a
 		tea.WithOutput(os.Stdout), // redirected stdin that silently eats keys
 	)
-	s.QuitUI = prog.Quit
+	// prog.Quit() must never run on the program's own goroutine: bubbletea
+	// hands messages over an unbuffered channel, so sending from inside Update
+	// deadlocks the loop. That is why "q" used to only disconnect.
+	s.QuitUI = func() { go prog.Quit() }
 	if onStart != nil {
 		onStart()
 	}

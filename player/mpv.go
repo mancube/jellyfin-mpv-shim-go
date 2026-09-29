@@ -54,7 +54,7 @@ type ProcOpts struct {
 	ConfigDir  string // mpv --config-dir; empty = mpv's default (the user's)
 	AuthHeader string // Authorization header value, sent via --http-header-fields; empty disables
 	MediaKeys  bool
-	MenuMouse  bool   // load the OSD menu's mouse script
+	MenuMouse  bool   // reserved: the mouse script is always loaded
 	LogLevel   string // mpv --msg-level=all=<level> ("" = mpv default)
 	Log        *log.Logger
 }
@@ -179,13 +179,13 @@ func (p *Proc) spawn(ctx context.Context) error {
 		}
 		args = append(args, "--config-dir="+p.cfgDir)
 	}
-	if p.menuMouse {
-		// Upstream ships mouse.lua next to the code; mpv takes an absolute path.
-		if script, err := p.mouseScript(); err == nil {
-			args = append(args, "--script="+script)
-		} else {
-			p.log.Printf("mouse menu: %v", err)
-		}
+	// The mouse script is always loaded and enabled/disabled at runtime through
+	// the shim-menu-enable message, so `menu_mouse` can be toggled from the OSD
+	// menu without restarting mpv (same design as upstream's mouse.lua).
+	if script, err := p.mouseScript(); err == nil {
+		args = append(args, "--script="+script)
+	} else {
+		p.log.Printf("mouse menu: %v", err)
 	}
 	if p.logLevel != "" {
 		args = append(args, "--msg-level=all="+p.logLevel)

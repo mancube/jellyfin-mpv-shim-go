@@ -1690,3 +1690,44 @@ func TestMenuEscWalksUpTheTree(t *testing.T) {
 	h.pl.Key("back")
 	at("<closed>") // and the root closes the menu
 }
+
+// The mouse script is always loaded (so `menu_mouse` can toggle it at runtime)
+// and the menu enables/disables it with the shim-menu-enable message, like
+// upstream. Toggling must not need an mpv restart.
+func TestMenuMouseToggleUsesClientMessage(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	o := h.pl.Options()
+	o.MenuMouse = true
+	h.pl.SetOptions(o)
+
+	before := h.fm.numCmds()
+	h.pl.Key("menu")
+	time.Sleep(50 * time.Millisecond)
+	h.pl.Key("back")
+	time.Sleep(50 * time.Millisecond)
+	h.fm.mu.Lock()
+	cmds := strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	// (the fake concatenates the command args without separators)
+	if !strings.Contains(cmds, "script-messageshim-menu-enableTrue") ||
+		!strings.Contains(cmds, "script-messageshim-menu-enableFalse") {
+		t.Errorf("mouse script not toggled with the menu: %q", cmds)
+	}
+
+	// With menu_mouse off, no mouse messages are sent at all.
+	o.MenuMouse = false
+	h.pl.SetOptions(o)
+	before = h.fm.numCmds()
+	h.pl.Key("menu")
+	time.Sleep(50 * time.Millisecond)
+	h.pl.Key("back")
+	time.Sleep(50 * time.Millisecond)
+	h.fm.mu.Lock()
+	cmds = strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if strings.Contains(cmds, "shim-menu-enable") {
+		t.Errorf("mouse script toggled although menu_mouse is off: %q", cmds)
+	}
+}
