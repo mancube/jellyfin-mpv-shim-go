@@ -497,15 +497,21 @@ func TestConsoleServerBroadcast(t *testing.T) {
 	}
 }
 
-// ShowConsole refuses when nothing is running, and does not need a terminal to
-// be present in the test environment.
-func TestShowConsoleNeedsRunningInstance(t *testing.T) {
-	err := ShowConsole("/bin/true", filepath.Join(t.TempDir(), "missing.sock"))
+// ShowWindow refuses a status window when nothing is running, and does not
+// need a terminal to be present in the test environment.
+func TestShowWindowNeedsRunningInstance(t *testing.T) {
+	err := ShowWindow("/bin/true", filepath.Join(t.TempDir(), "missing.sock"), "--console")
 	if err == nil {
-		t.Fatal("ShowConsole should fail when the instance is not running")
+		t.Fatal("ShowWindow should fail when the instance is not running")
 	}
 	if !strings.Contains(err.Error(), "not running") {
 		t.Errorf("error = %v, want a clear 'not running' message", err)
+	}
+	// No socket (the account wizard): the window is opened regardless, so the
+	// error — if any — is about the terminal, not about a running instance.
+	if err := ShowWindow("/bin/true", "", "setup"); err != nil &&
+		strings.Contains(err.Error(), "not running") {
+		t.Errorf("error = %v, setup needs no running instance", err)
 	}
 }
 

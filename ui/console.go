@@ -222,7 +222,7 @@ func RunConsoleClient(ctx context.Context, path string) error {
 		prog.Quit()
 	}()
 
-	readErr := make(chan error, 1)
+	// The instance went away (socket closed): close this window too.
 	go func() {
 		sc := bufio.NewScanner(conn)
 		sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
@@ -232,10 +232,13 @@ func RunConsoleClient(ctx context.Context, path string) error {
 				prog.Send(consoleSnapMsg(snap))
 			}
 		}
-		readErr <- sc.Err()
+		prog.Quit()
 	}()
+	// q / ctrl+c / esc only stop the program: the scanner is still blocked on
+	// the socket, so returning here is what actually closes the window. The
+	// deferred conn.Close unblocks that goroutine.
 	_, _ = prog.Run()
-	return <-readErr
+	return nil
 }
 
 // --- launching a terminal --------------------------------------------------
@@ -256,17 +259,23 @@ var terminalEmulators = []struct {
 	{"x-terminal-emulator", []string{"-e", "%s"}},
 }
 
-// ShowConsole opens a terminal running `mpv-shim --console`. selfPath is this
-// executable; found reports whether an emulator was launched (it logs the
-// command when none is installed).
-func ShowConsole(selfPath, socket string) error {
-	if socket == "" {
-		return fmt.Errorf("console: no socket path")
+// ShowWindow opens a terminal running `selfPath args...` — the status window
+// (socket set) or the account wizard (socket empty). selfPath is this
+// executable; it reports the command to run when no emulator is installed.
+func ShowWindow(selfPath, socket string, args ...string) error {
+	if socket != "" {
+		// A status window attaches to the running instance: fail before
+		// spawning a terminal that would only show "not running".
+		if err := dialCheck(socket); err != nil {
+			return err
+		}
 	}
-	if err := dialCheck(socket); err != nil {
-		return err
+	quoted := make([]string, 0, len(args)+1)
+	quoted = append(quoted, shellQuote(selfPath))
+	for _, a := range args {
+		quoted = append(quoted, shellQuote(a))
 	}
-	shell := fmt.Sprintf("%s --console", shellQuote(selfPath))
+	shell := strings.Join(quoted, " ")
 	for _, emu := range terminalEmulators {
 		bin, err := exec.LookPath(emu.bin)
 		if err != nil {
@@ -288,8 +297,8 @@ func ShowConsole(selfPath, socket string) error {
 		go func() { _ = cmd.Wait() }()
 		return nil
 	}
-	return fmt.Errorf("no terminal emulator found (tried %s); run `%s --console` yourself",
-		emulatorList(), shellQuote(selfPath+" --console"))
+	return fmt.Errorf("no terminal emulator found (tried %s); run `%s` yourself",
+		emulatorList(), shell)
 }
 
 func emulatorList() string {

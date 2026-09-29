@@ -35,7 +35,14 @@ func RunTray(s *Session) bool {
 		systray.AddSeparator()
 
 		accounts := systray.AddMenuItem("Configure Servers…", "Add or remove an account")
-		accounts.Click(func() { s.RequestAccounts() })
+		accounts.Click(func() {
+			// Headless (no TUI): a window of its own, like "Show Console".
+			if s.OpenSetup != nil {
+				s.OpenSetup()
+				return
+			}
+			s.RequestAccounts()
+		})
 
 		osd := systray.AddMenuItem("Player Menu (OSD)", "Open the in-player audio/subtitle menu")
 		osd.Click(func() {

@@ -687,13 +687,12 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 		return ""
 	}
 	uiSess.OpenUpdatePage = sess.pl.OpenUpdatePage
+	selfPath, err := os.Executable()
+	if err != nil {
+		lg.Printf("tray windows: %v", err)
+	}
 	uiSess.OpenConsole = func() {
-		self, err := os.Executable()
-		if err != nil {
-			lg.Printf("console: %v", err)
-			return
-		}
-		if err := ui.ShowConsole(self, sock); err != nil {
+		if err := ui.ShowWindow(selfPath, sock, "--console"); err != nil {
 			lg.Printf("console: %v", err)
 		}
 	}
@@ -715,7 +714,14 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 	uiSess.SetLogf(lg.Printf)
 
 	if !interactive {
-		// Tray-only: no TUI, the console window is the on-demand surface.
+		// Tray-only: no TUI, so the console window is the on-demand surface —
+		// and so is the account wizard. It runs as its own process editing the
+		// saved accounts; closing it leaves this one (and playback) running.
+		uiSess.OpenSetup = func() {
+			if err := ui.ShowWindow(selfPath, "", "setup"); err != nil {
+				lg.Printf("setup: %v", err)
+			}
+		}
 		if ok := ui.RunTray(uiSess); !ok {
 			lg.Printf("tray: no system tray host found; running with logs only")
 		}
