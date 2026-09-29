@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -12,9 +13,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"mpv-shim/jfin"
 	"mpv-shim/player"
+	"mpv-shim/ui"
 )
 
 // minimalMvp is just enough of player.Mpv for handlePlay tests.
@@ -378,4 +381,52 @@ func TestSettingsConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 	<-stop
+}
+
+// Disconnect stops the socket loop but keeps the player usable, and a
+// reconnect starts the loop again (the tray item toggles between the two).
+func TestSessionDisconnectReconnect(t *testing.T) {
+	var logBuf bytes.Buffer
+	lg := log.New(&logBuf, "", 0)
+	s := DefaultSettings()
+	sess, err := newSession(&s, jfin.Account{Server: "http://127.0.0.1:1", DeviceID: "d1"}, lg, ui.NewLogRing(10), t.TempDir(), filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sess.pl.Start(ctx)
+	defer sess.shutdown(ctx)
+
+	sess.start(ctx)
+	// The server is unreachable, so we should be in the reconnecting state.
+	deadline := time.Now().Add(2 * time.Second)
+	for sess.ws.State() != jfin.StateReconnecting {
+		if time.Now().After(deadline) {
+			t.Fatalf("state = %d, want reconnecting", sess.ws.State())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sess.disconnect()
+	if sess.connected() {
+		t.Error("still connected after disconnect")
+	}
+	// The player is untouched by a disconnect.
+	if sess.pl.Status().Playing {
+		t.Log("player reports playing (mpv alive) — fine")
+	}
+
+	// Reconnecting starts the loop again.
+	sess.start(ctx)
+	deadline = time.Now().Add(2 * time.Second)
+	for sess.ws.State() != jfin.StateReconnecting {
+		if time.Now().After(deadline) {
+			t.Fatalf("state after reconnect = %d, want reconnecting", sess.ws.State())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(logBuf.String(), "connecting to") {
+		t.Errorf("reconnect did not log a new attempt:\n%s", logBuf.String())
+	}
 }

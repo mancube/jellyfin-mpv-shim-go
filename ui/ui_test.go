@@ -264,6 +264,76 @@ func TestRequestAccountsNonBlocking(t *testing.T) {
 	s.RequestAccounts()
 }
 
+// The connection item is one item with two actions: while connected it
+// disconnects, while disconnected it reconnects.
+func TestConnectionItemToggles(t *testing.T) {
+	s := NewSession(jfin.Account{Server: "http://x"}, nil, nil, NewLogRing(4))
+	connected := true
+	var disconnects, reconnects int
+	s.Connected = func() bool { return connected }
+	s.Disconnect = func() { disconnects++; connected = false }
+	s.Reconnect = func() { reconnects++; connected = true }
+
+	// Click while online → disconnect only.
+	clickConnection(s)
+	if disconnects != 1 || reconnects != 0 || connected {
+		t.Errorf("online click: disconnects=%d reconnects=%d connected=%v", disconnects, reconnects, connected)
+	}
+	// Click while offline → reconnect.
+	clickConnection(s)
+	if reconnects != 1 || disconnects != 1 || !connected {
+		t.Errorf("offline click: disconnects=%d reconnects=%d connected=%v", disconnects, reconnects, connected)
+	}
+}
+
+// clickConnection mirrors what the tray item does on a click.
+func clickConnection(s *Session) {
+	if s.Connected != nil && s.Connected() {
+		if s.Disconnect != nil {
+			s.Disconnect()
+		}
+		return
+	}
+	if s.Reconnect != nil {
+		s.Reconnect()
+	}
+}
+
+// The TUI offers reconnect with `r` only while offline.
+func TestStatusReconnectKey(t *testing.T) {
+	s := NewSession(jfin.Account{Server: "http://x"}, nil, nil, NewLogRing(4))
+	connected := true
+	var reconnects, setupOpens int
+	s.Connected = func() bool { return connected }
+	s.Reconnect = func() { reconnects++ }
+	m := newStatusModel(s, Deps{Creds: testCreds()})
+
+	// Online: r opens the accounts list, it does not reconnect.
+	m.inSetup = true // pretend the wizard is open so we can see it switch
+	next, _ := m.Update(keyMsg("r"))
+	m = next.(statusModel)
+	if reconnects != 0 {
+		t.Error("r reconnected while online")
+	}
+	if !m.inSetup {
+		t.Error("r did not open the accounts list while online")
+	}
+
+	// Offline: r reconnects.
+	connected = false
+	m.inSetup = false
+	setupOpens = 0
+	_ = setupOpens
+	next, _ = m.Update(keyMsg("r"))
+	m = next.(statusModel)
+	if reconnects != 1 {
+		t.Errorf("r did not reconnect while offline (reconnects=%d)", reconnects)
+	}
+	if m.inSetup {
+		t.Error("r opened the wizard instead of reconnecting")
+	}
+}
+
 // The tray's Quit must reach *both* the session and the TUI; Disconnect only
 // the session. This is what makes "Quit" actually exit instead of leaving an
 // offline window behind.

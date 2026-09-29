@@ -67,10 +67,17 @@ func RunTray(s *Session) bool {
 			}
 		}
 
-		disconnect := systray.AddMenuItem("Disconnect", "Drop the connection, keep the window open")
-		disconnect.Click(func() {
-			if s.Disconnect != nil {
-				s.Disconnect()
+		connection := systray.AddMenuItem("Disconnect", "Drop the connection, keep playing")
+		connection.Click(func() {
+			// One item, two actions: the label follows the state.
+			if s.Connected != nil && s.Connected() {
+				if s.Disconnect != nil {
+					s.Disconnect()
+				}
+				return
+			}
+			if s.Reconnect != nil {
+				s.Reconnect()
 			}
 		})
 		quit := systray.AddMenuItem("Quit", "Stop mpv-shim and close the window")
@@ -85,7 +92,7 @@ func RunTray(s *Session) bool {
 		})
 
 		close(ready)
-		go refreshTray(s, status, nowPlaying)
+		go refreshTray(s, status, nowPlaying, connection)
 	}, func() {})
 
 	select {
@@ -108,7 +115,7 @@ func connLabel(state int32) string {
 	}
 }
 
-func refreshTray(s *Session, status, nowPlaying *systray.MenuItem) {
+func refreshTray(s *Session, status, nowPlaying, connection *systray.MenuItem) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	lastState := int32(-1) // force the first swap
@@ -118,6 +125,17 @@ func refreshTray(s *Session, status, nowPlaying *systray.MenuItem) {
 			lastState = state
 			setTrayIcon(state)
 		}
+		// The connection item mirrors the state: Disconnect while online,
+		// Reconnect while offline.
+		online := state == jfin.StateConnected
+		if online {
+			connection.SetTitle("Disconnect")
+			connection.SetTooltip("Drop the connection, keep playing")
+		} else {
+			connection.SetTitle("Reconnect")
+			connection.SetTooltip("Connect to " + s.Account.Server + " again")
+		}
+
 		text := "mpv-shim — " + connLabel(state)
 		if s.UpdateNote != nil {
 			if note := s.UpdateNote(); note != "" {

@@ -30,8 +30,12 @@ type Session struct {
 	OpenUpdatePage func()
 	// Quit stops the whole app: the session, mpv and the TUI.
 	Quit func()
-	// Disconnect stops the session only, leaving the UI up (tray).
+	// Disconnect drops the connection but keeps playback and the UI up;
+	// Reconnect starts the socket loop again. The tray item toggles between
+	// the two based on Connected.
 	Disconnect func()
+	Reconnect  func()
+	Connected  func() bool
 	// QuitUI asks the TUI program to exit; installed by RunStatus.
 	QuitUI func()
 
@@ -100,7 +104,17 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.s.Quit()
 			}
 			return m, tea.Quit // the TUI leaves; main then stops the session
-		case "a", "r", "i", "p":
+		case "r":
+			// r = reconnect when we are offline, otherwise the accounts list
+			// (tray parity: the connection item toggles the same way).
+			if m.s.Connected != nil && !m.s.Connected() {
+				if m.s.Reconnect != nil {
+					m.s.Reconnect()
+				}
+				return m, nil
+			}
+			return m.openSetup()
+		case "a", "i", "p":
 			return m.openSetup()
 		}
 	case accountsMsg:
@@ -126,14 +140,19 @@ func (m statusModel) View() string {
 	if m.inSetup {
 		return m.setup.View()
 	}
-	views := []string{m.headerView(), m.nowPlayingView()}
+	views := []string{m.headerView()}
+	if m.s.Connected != nil && !m.s.Connected() {
+		views = append(views, styWarn.Render("  disconnected — press r or use the tray to reconnect"))
+	}
+	views = append(views, m.nowPlayingView())
 	if m.s.UpdateNote != nil {
 		if note := m.s.UpdateNote(); note != "" {
 			views = append(views, styWarn.Render("▲ "+note))
 		}
 	}
 	views = append(views, m.logView(), "",
-		hints([2]string{"a", "accounts"}, [2]string{"p", "add account"}, [2]string{"q", "quit"}), "")
+		hints([2]string{"a", "accounts"}, [2]string{"p", "add account"},
+			[2]string{"r", "reconnect"}, [2]string{"q", "quit"}), "")
 	return strings.Join(views, "\n")
 }
 

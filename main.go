@@ -224,7 +224,9 @@ type session struct {
 	logs    *ui.LogRing
 	ipcDir  string
 	lg      *log.Logger
-	cancel  context.CancelFunc
+
+	mu     sync.Mutex // guards cancel (start/disconnect)
+	cancel context.CancelFunc
 }
 
 // newSession wires the client, mpv, player and WS event handlers.
@@ -450,19 +452,49 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	return &session{account: a, client: client, proc: proc, pl: pl, ws: ws, logs: logs, ipcDir: ipcDir, lg: lg}, nil
 }
 
-// run keeps the /socket connection alive until ctx is canceled, then tears
-// playback down and kills mpv (upstream mpv_shim.py shutdown order).
-func (sess *session) run(ctx context.Context) {
-	ctx, sess.cancel = context.WithCancel(ctx)
-	defer sess.cancel()
-	sess.pl.Start(ctx)
-	defer sess.pl.Shutdown()
-	defer os.RemoveAll(sess.ipcDir)
-	sess.lg.Printf("mpv-shim %s — server %s, user %s, device %s", version, sess.account.Server, sess.account.Username, sess.account.DeviceID)
-	sess.lg.Printf("session loop running, Ctrl-C to quit")
-	if err := sess.ws.Run(ctx); err != nil && ctx.Err() == nil {
-		sess.lg.Printf("session loop ended: %v", err)
+// start launches the /socket loop in the background. It can be stopped with
+// disconnect() and started again with start() — the tray's Reconnect does
+// exactly that, and the player/mpv keep running in between.
+func (sess *session) start(ctx context.Context) {
+	sess.mu.Lock()
+	if sess.cancel != nil {
+		sess.cancel() // replace an earlier loop
 	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	sess.cancel = cancel
+	sess.mu.Unlock()
+
+	sess.lg.Printf("connecting to %s", sess.account.Server)
+	go func() {
+		if err := sess.ws.Run(loopCtx); err != nil && loopCtx.Err() == nil {
+			sess.lg.Printf("session loop ended: %v", err)
+		}
+		if loopCtx.Err() != nil {
+			sess.lg.Printf("disconnected")
+		}
+	}()
+}
+
+// disconnect stops the /socket loop but leaves playback, mpv and the UI alone.
+func (sess *session) disconnect() {
+	sess.mu.Lock()
+	cancel := sess.cancel
+	sess.cancel = nil
+	sess.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// connected reports whether the socket is up right now.
+func (sess *session) connected() bool { return sess.ws.Connected() }
+
+// shutdown is the app-exit path: stop the socket loop, tear playback down and
+// kill mpv (upstream mpv_shim.py shutdown order).
+func (sess *session) shutdown(ctx context.Context) {
+	sess.disconnect()
+	sess.pl.Shutdown()
+	_ = os.RemoveAll(sess.ipcDir)
 	sess.lg.Printf("bye")
 }
 
@@ -491,7 +523,9 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go sess.run(sigCtx)
+	sess.pl.Start(sigCtx) // the player outlives a disconnect
+	sess.start(sigCtx)
+	defer sess.shutdown(sigCtx)
 
 	if !interactive {
 		<-sigCtx.Done() // headless: logs only (daemon mode)
@@ -527,7 +561,11 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 			}
 		})
 	}
-	uiSess.Disconnect = func() { stop() }
+	// Disconnect drops the socket but keeps the player and the UI; the tray
+	// item then offers Reconnect, which starts the loop again.
+	uiSess.Connected = sess.connected
+	uiSess.Disconnect = sess.disconnect
+	uiSess.Reconnect = func() { sess.start(sigCtx) }
 	uiSess.SetLogf(lg.Printf)
 	deps := ui.Deps{
 		Creds:    creds,
@@ -543,7 +581,7 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 			lg.Printf("tray: no system tray host found (GNOME needs the AppIndicator extension); the TUI is the full surface")
 		}
 	})
-	stop() // the TUI exited (q / tray Quit): shut the session down
+	stop() // the TUI exited (q / tray Quit)
 	return 0
 }
 
