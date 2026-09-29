@@ -12,6 +12,33 @@ type ProfileOpts struct {
 	ForceTranscode bool
 	TranscodeH265  bool // allow h265/hevc as transcode targets
 	ForceH264      bool // force h264 output
+
+	// CodecProfiles knobs (upstream transcode_*). These are what make the
+	// server transcode content this device cannot decode: without them a
+	// 10-bit/HDR/Dolby-Vision file is direct-played regardless of bitrate.
+	TranscodeHi10p       bool
+	TranscodeHDR         bool
+	TranscodeDolbyVision bool
+	TranscodeHEVC        bool
+	TranscodeAV1         bool
+	Transcode4K          bool
+	ForceVideoCodec      string
+	ForceAudioCodec      string
+	AlwaysTranscode      bool // upstream always_transcode: no DirectPlay
+}
+
+// CodecProfile is a device-profile CodecProfiles entry.
+type CodecProfile struct {
+	Type       string      `json:"Type"`
+	Codec      string      `json:"Codec,omitempty"`
+	Conditions []Condition `json:"Conditions"`
+}
+
+// Condition is one CodecProfiles condition.
+type Condition struct {
+	Condition string `json:"Condition"`
+	Property  string `json:"Property"`
+	Value     string `json:"Value"`
 }
 
 // Profile is the DeviceProfile sent with PlaybackInfo requests. Port of
@@ -26,7 +53,7 @@ type Profile struct {
 	DirectPlayProfiles               []Transcoding     `json:"DirectPlayProfiles"`
 	ResponseProfiles                 []any             `json:"ResponseProfiles"`
 	ContainerProfiles                []any             `json:"ContainerProfiles"`
-	CodecProfiles                    []any             `json:"CodecProfiles"`
+	CodecProfiles                    []CodecProfile    `json:"CodecProfiles"`
 	SubtitleProfiles                 []SubtitleProfile `json:"SubtitleProfiles"`
 }
 
@@ -87,7 +114,7 @@ func DeviceProfile(o ProfileOpts) (*Profile, error) {
 		},
 		ResponseProfiles:  []any{},
 		ContainerProfiles: []any{},
-		CodecProfiles:     []any{},
+		CodecProfiles:     codecProfiles(o),
 		SubtitleProfiles: []SubtitleProfile{
 			{"srt", "External"}, {"srt", "Embed"},
 			{"ass", "External"}, {"ass", "Embed"},
@@ -101,5 +128,54 @@ func DeviceProfile(o ProfileOpts) (*Profile, error) {
 			{"pgs", "Embed"},
 		},
 	}
+	// Forced codecs (upstream force_video_codec/force_audio_codec): the only
+	// transcoding profiles may use these.
+	for i := range p.TranscodingProfiles {
+		if v := o.ForceVideoCodec; v != "" && p.TranscodingProfiles[i].Type == "Video" {
+			p.TranscodingProfiles[i].VideoCodec = v
+		}
+		if a := o.ForceAudioCodec; a != "" && p.TranscodingProfiles[i].Type == "Video" {
+			p.TranscodingProfiles[i].AudioCodec = a
+		}
+	}
+	// Disable Direct Play (upstream always_transcode).
+	if o.ForceTranscode {
+		p.DirectPlayProfiles = []Transcoding{}
+	}
 	return p, nil
+}
+
+// codecProfiles builds the CodecProfiles list. Each entry tells the server
+// "transcode video when this condition holds" (upstream transcode_*).
+func codecProfiles(o ProfileOpts) []CodecProfile {
+	out := []CodecProfile{} // never null: the server expects a list
+	add := func(codec string, conds ...Condition) {
+		out = append(out, CodecProfile{Type: "Video", Codec: codec, Conditions: conds})
+	}
+	if o.TranscodeHi10p {
+		add("", Condition{"LessThanEqual", "VideoBitDepth", "8"})
+	}
+	if o.TranscodeDolbyVision {
+		add("", Condition{"NotEquals", "VideoRangeType", "DOVI"})
+	}
+	if o.TranscodeHDR {
+		add("", Condition{"Equals", "VideoRangeType", "SDR"})
+	}
+	// HEVC/AV1: upstream blocks them via a Width==0 condition (a trick that
+	// never matches, i.e. "no restriction" for the remaining codecs).
+	if o.TranscodeHEVC {
+		for _, c := range []string{"hevc", "h265"} {
+			add(c, Condition{"Equals", "Width", "0"})
+		}
+	}
+	if o.TranscodeAV1 {
+		add("av1", Condition{"Equals", "Width", "0"})
+	}
+	if o.Transcode4K {
+		add("",
+			Condition{"LessThanEqual", "Width", "1920"},
+			Condition{"LessThanEqual", "Height", "1080"},
+		)
+	}
+	return out
 }

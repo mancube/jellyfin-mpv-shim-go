@@ -112,6 +112,33 @@ func (f *fakeServer) client() *Client {
 	return &Client{Base: f.Server.URL, UserID: "u1", DeviceID: "dev1", http: http.DefaultClient}
 }
 
+// newFixture starts a fakeServer with one default source.
+func newFixture(t *testing.T) *fakeServer {
+	t.Helper()
+	f := &fakeServer{item: Item{ID: "i1", Type: "Movie", Name: "Movie"}}
+	f.Server = httptest.NewServer(f.handler())
+	t.Cleanup(f.Close)
+	f.sources = []MediaSource{{
+		ID: "src1", Protocol: "Http", SupportsDirectStream: true, Bitrate: 1000,
+	}}
+	return f
+}
+
+func jfinSource(path string) MediaSource {
+	return MediaSource{ID: "src1", Protocol: "File", Path: path,
+		SupportsDirectPlay: true, SupportsDirectStream: true, Bitrate: 1000}
+}
+
+// newTestMediaWith is newTestMedia with an explicit config.
+func newTestMediaWith(t *testing.T, c *Client, itemID string, local bool, cfg MediaConfig) *Media {
+	t.Helper()
+	cfg.LocalKbps, cfg.RemoteKbps = 10000, 3000
+	m := &Media{C: c, Cfg: cfg, Queue: []PlaylistItem{{PlaylistItemId: "p1", ID: itemID}},
+		Seq: 0, UserID: "u1", IsLocal: local}
+	m.Video = &Video{M: m, ID: itemID, Item: &Item{ID: itemID, Name: "Movie", Type: "Movie"}}
+	return m
+}
+
 func newTestMedia(t *testing.T, c *Client, itemID string, local bool) *Media {
 	t.Helper()
 	m := &Media{
@@ -316,5 +343,173 @@ func TestHasScheme(t *testing.T) {
 		if got := hasScheme(tc.s); got != tc.want {
 			t.Errorf("hasScheme(%q) = %v, want %v", tc.s, got, tc.want)
 		}
+	}
+}
+
+// CodecProfiles are what make the server transcode content we cannot decode;
+// forced codecs narrow the transcoding profile (upstream transcode_*,
+// force_video_codec/force_audio_codec).
+func TestDeviceProfileCodecKnobs(t *testing.T) {
+	cond := func(p []CodecProfile, prop, val string) bool {
+		for _, c := range p {
+			for _, k := range c.Conditions {
+				if k.Property == prop && k.Value == val {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	base, err := DeviceProfile(ProfileOpts{LocalKbps: 10000, RemoteKbps: 25000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(base.CodecProfiles) != 0 {
+		t.Errorf("default CodecProfiles = %v, want none", base.CodecProfiles)
+	}
+
+	hdr, err := DeviceProfile(ProfileOpts{LocalKbps: 10000, RemoteKbps: 25000,
+		TranscodeHDR: true, TranscodeHi10p: true, TranscodeDolbyVision: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cond(hdr.CodecProfiles, "VideoRangeType", "SDR") {
+		t.Error("transcode_hdr condition missing")
+	}
+	if !cond(hdr.CodecProfiles, "VideoBitDepth", "8") {
+		t.Error("transcode_hi10p condition missing")
+	}
+	if !cond(hdr.CodecProfiles, "VideoRangeType", "DOVI") {
+		t.Error("transcode_dolby_vision condition missing")
+	}
+
+	hevc, err := DeviceProfile(ProfileOpts{LocalKbps: 10000, RemoteKbps: 25000, TranscodeHEVC: true, TranscodeAV1: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codecs := map[string]bool{}
+	for _, c := range hevc.CodecProfiles {
+		codecs[c.Codec] = true
+	}
+	for _, want := range []string{"hevc", "h265", "av1"} {
+		if !codecs[want] {
+			t.Errorf("codec %q not forced: %v", want, codecs)
+		}
+	}
+
+	forced, err := DeviceProfile(ProfileOpts{LocalKbps: 10000, RemoteKbps: 25000,
+		ForceVideoCodec: "h264", ForceAudioCodec: "eac3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v *Transcoding
+	for i := range forced.TranscodingProfiles {
+		if forced.TranscodingProfiles[i].Type == "Video" {
+			v = &forced.TranscodingProfiles[i]
+		}
+	}
+	if v == nil || v.VideoCodec != "h264" || v.AudioCodec != "eac3" {
+		t.Errorf("forced codecs not applied: %+v", v)
+	}
+
+	noDirect, err := DeviceProfile(ProfileOpts{LocalKbps: 10000, RemoteKbps: 25000, ForceTranscode: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noDirect.DirectPlayProfiles) != 0 {
+		t.Errorf("always_transcode: DirectPlayProfiles = %v", noDirect.DirectPlayProfiles)
+	}
+}
+
+// Path substitutions rewrite a remote server path to a local mount
+// (upstream direct_paths + path_substitutions); the longest prefix wins.
+func TestPathSubstitution(t *testing.T) {
+	f := newFixture(t)
+	f.sources = []MediaSource{jfinSource("/data/media/Movies/movie.mkv")}
+	cfg := MediaConfig{PathSubstitutions: map[string]string{
+		"/data/media/Movies": "/mnt/nas/Movies",
+		"/data/media":        "/mnt/nas",
+	}}
+	m := newTestMediaWith(t, f.client(), "i1", false, cfg)
+	if got := m.Video.substitutePath("/data/media/Movies/movie.mkv"); got != "/mnt/nas/Movies/movie.mkv" {
+		t.Errorf("substitutePath = %q, want /mnt/nas/Movies/movie.mkv", got)
+	}
+	if got := m.Video.substitutePath("/data/media/Other/x.mkv"); got != "/mnt/nas/Other/x.mkv" {
+		t.Errorf("substitutePath = %q, want /mnt/nas/Other/x.mkv", got)
+	}
+	if got := m.Video.substitutePath("/other/x.mkv"); got != "/other/x.mkv" {
+		t.Errorf("unmatched path changed: %q", got)
+	}
+	// With no rules the path is returned unchanged.
+	plain := newTestMediaWith(t, f.client(), "i1", false, MediaConfig{})
+	if got := plain.Video.substitutePath("/data/x.mkv"); got != "/data/x.mkv" {
+		t.Errorf("no rules changed the path: %q", got)
+	}
+}
+
+// Language rules pick tracks by language; filters are the fallback
+// (upstream language_config / lang_filter_audio/sub).
+func TestLanguageRulesAndFilters(t *testing.T) {
+	f := newFixture(t)
+	f.sources = []MediaSource{{
+		ID: "src1", Protocol: "Http", SupportsDirectStream: true,
+		MediaStreams: []MediaStream{
+			{Type: "Audio", Index: 1, Language: "jpn"},
+			{Type: "Audio", Index: 2, Language: "eng"},
+			{Type: "Subtitle", Index: 3, Language: "eng"},
+			{Type: "Subtitle", Index: 4, Language: ""}, // "und"
+		},
+	}}
+	mk := func(cfg MediaConfig) *Video {
+		m := newTestMediaWith(t, f.client(), "i1", false, cfg)
+		src := f.sources[0] // PlaybackURL would do this; set it directly here
+		m.Video.MediaSource = &src
+		m.Video.MapStreams()
+		m.Video.applyLanguageRules()
+		return m.Video
+	}
+
+	// An explicit rule wins.
+	v := mk(MediaConfig{LanguageRules: []LanguageRule{
+		{AudioLang: "eng", SubLang: "eng", Enabled: true, Priority: 10},
+	}})
+	if v.Aid == nil || *v.Aid != 2 {
+		t.Errorf("rule audio = %v, want 2", v.Aid)
+	}
+	if v.Sid == nil || *v.Sid != 3 {
+		t.Errorf("rule subtitle = %v, want 3", v.Sid)
+	}
+
+	// Higher priority first, first match wins.
+	v = mk(MediaConfig{LanguageRules: []LanguageRule{
+		{AudioLang: "eng", Enabled: true, Priority: 1},
+		{AudioLang: "jpn", Enabled: true, Priority: 9},
+	}})
+	if v.Aid == nil || *v.Aid != 1 {
+		t.Errorf("priority not honoured: audio = %v, want 1 (jpn)", v.Aid)
+	}
+
+	// A disabled rule is ignored.
+	v = mk(MediaConfig{LanguageRules: []LanguageRule{{AudioLang: "jpn", Enabled: false}}})
+	if v.Aid != nil {
+		t.Errorf("disabled rule applied: audio = %v", v.Aid)
+	}
+
+	// Filters: "und" matches the untagged stream.
+	v = mk(MediaConfig{LangFilterSub: "und"})
+	if v.Sid == nil || *v.Sid != 4 {
+		t.Errorf("lang_filter_sub = %v, want 4 (und)", v.Sid)
+	}
+	// A subtitle filter that matches nothing turns subtitles off.
+	v = mk(MediaConfig{LangFilterSub: "deu"})
+	if v.Sid == nil || *v.Sid != -1 {
+		t.Errorf("unmatched subtitle filter = %v, want -1 (off)", v.Sid)
+	}
+	// The audio filter is a filter, not an order: we keep the first stream in
+	// file order whose language is allowed (jpn comes first in this file).
+	v = mk(MediaConfig{LangFilterAudio: "eng,jpn"})
+	if v.Aid == nil || *v.Aid != 1 {
+		t.Errorf("lang_filter_audio = %v, want 1 (first allowed stream in file order)", v.Aid)
 	}
 }

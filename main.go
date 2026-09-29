@@ -224,6 +224,35 @@ type session struct {
 }
 
 // newSession wires the client, mpv, player and WS event handlers.
+// mediaConfig maps the config onto the media/device-profile options.
+func mediaConfig(s *Settings) jfin.MediaConfig {
+	rules := make([]jfin.LanguageRule, 0, len(s.LanguageConfig))
+	for _, r := range s.LanguageConfig {
+		rules = append(rules, jfin.LanguageRule{
+			AudioLang: r.AudioLang, SubLang: r.SubLang,
+			AudioNone: r.AudioNone, SubNone: r.SubNone,
+			Enabled: r.Enabled, Priority: r.Priority, Note: r.Note,
+		})
+	}
+	return jfin.MediaConfig{
+		LocalKbps: s.LocalKbps, RemoteKbps: s.RemoteKbps,
+		TranscodeH265: s.TranscodeH265, ForceH264: s.ForceH264,
+		SkipIntro: s.SkipIntro, SkipCredits: s.SkipCredits,
+		AlwaysTranscode:      s.AlwaysTranscode,
+		TranscodeHi10p:       s.TranscodeHi10p,
+		TranscodeHDR:         s.TranscodeHDR,
+		TranscodeDolbyVision: s.TranscodeDolbyVision,
+		ForceVideoCodec:      s.ForceVideoCodec,
+		ForceAudioCodec:      s.ForceAudioCodec,
+		DirectPaths:          s.DirectPaths,
+		RemoteDirectPaths:    s.RemoteDirectPaths,
+		PathSubstitutions:    s.PathSubstitutions,
+		LangFilterAudio:      s.LangFilterAudio,
+		LangFilterSub:        s.LangFilterSub,
+		LanguageRules:        rules,
+	}
+}
+
 // playerOptions maps the config onto the player's runtime options.
 func playerOptions(s *Settings) player.Options {
 	o := player.DefaultOptions()
@@ -280,11 +309,7 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 		pl.ScreenshotDir = filepath.Join(configDir, "screenshots")
 	}
 
-	mcfg := jfin.MediaConfig{
-		LocalKbps: s.LocalKbps, RemoteKbps: s.RemoteKbps,
-		TranscodeH265: s.TranscodeH265, ForceH264: s.ForceH264,
-		SkipIntro: s.SkipIntro, SkipCredits: s.SkipCredits,
-	}
+	mcfg := mediaConfig(s)
 
 	ws := jfin.NewWS(client, lg)
 	if s.HealthCheckS > 0 {
