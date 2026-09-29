@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mpv-shim/jfin"
@@ -24,7 +25,13 @@ type Player struct {
 	ctx   context.Context
 	media *jfin.Media
 	url   string
-	start time.Time
+	// entryID is the playlist entry mpv gave the current load. Every load
+	// replaces the entry, so the end-file of the previous one is stale.
+	// Atomic: the IPC reader goroutine reads it and must never block on
+	// p.mu — it is the goroutine that delivers mpv's command replies, so a
+	// blocked reader deadlocks every player holding p.mu.
+	entryID atomic.Int64
+	start   time.Time
 	// Timeline state (upstream names).
 	shouldSendTimeline bool
 	watchedMarked      bool
@@ -35,10 +42,12 @@ type Player struct {
 	lastSeek           float64
 	doNotHandlePause   bool
 	pauseIgnore        bool
-	fileErr            bool
-	stopping           bool
-	events             chan mpvEvent
-	menu               *menu
+	// loadFailed: mpv could not load a file. Atomic for the same reason as
+	// entryID (the reader goroutine writes it).
+	loadFailed atomic.Bool
+	stopping   bool
+	events     chan mpvEvent
+	menu       *menu
 	// last reported pause/mute/volume, to spot remote/UI-visible changes
 	repPause    bool
 	repMute     bool
@@ -80,7 +89,6 @@ type mpvEvent struct {
 	prop   string          // property-change: property name
 	data   json.RawMessage // property-change: new value
 	reason string          // end-file: "eof" | "stop" | "quit" | "error" | ...
-
 }
 
 func New(mpv Mpv, lg *log.Logger) *Player {
@@ -305,10 +313,12 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	}
 	p.url = url
 	p.mpv.SetProperty("keep-open", m.HasNext())
-	if err := p.mpv.LoadFile(p.ctx, url); err != nil {
+	id, err := p.mpv.LoadFile(p.ctx, url)
+	if err != nil {
 		p.doNotHandlePause = false
 		return err
 	}
+	p.entryID.Store(id)
 	if !p.waitForDuration(p.timeoutLocked()) {
 		p.doNotHandlePause = false
 		p.stopLocked()
@@ -507,10 +517,18 @@ func (p *Player) handleEvent(name string, data json.RawMessage) {
 		// finished is what made closing the window auto-advance the queue in a
 		// loop, spawning a new mpv for every following episode.
 		var e struct {
-			Reason    string `json:"reason"`
-			FileError string `json:"file_error"`
+			Reason          string `json:"reason"`
+			FileError       string `json:"file_error"`
+			PlaylistEntryID int64  `json:"playlist_entry_id"`
 		}
 		_ = json.Unmarshal(data, &e)
+		// `loadfile replace` ends the previous file, and that end-file
+		// arrives around the new load: acting on it would stop the stream we
+		// just requested (the transcode re-request, a track/profile change).
+		if cur := p.entryID.Load(); cur != 0 && e.PlaylistEntryID != 0 && e.PlaylistEntryID != cur {
+			p.log.Printf("ignoring end-file of replaced entry %d (playing %d)", e.PlaylistEntryID, cur)
+			return
+		}
 		reason := e.Reason
 		if e.Reason == "error" || e.FileError != "" {
 			failed = true
@@ -527,9 +545,7 @@ func (p *Player) handleEvent(name string, data json.RawMessage) {
 		return
 	}
 	if failed {
-		p.mu.Lock()
-		p.fileErr = true
-		p.mu.Unlock()
+		p.loadFailed.Store(true)
 	}
 	if failed {
 		name = "file-error"
@@ -559,7 +575,7 @@ func (p *Player) eventLoop() {
 		}
 		if ev.name == "file-error" {
 			p.mu.Lock()
-			p.fileErr = false
+			p.loadFailed.Store(false)
 			p.log.Printf("mpv failed to load media")
 			p.stopLocked()
 			p.mu.Unlock()
@@ -691,7 +707,7 @@ func (p *Player) handleExit() {
 	}
 
 	p.doNotHandlePause = true
-	p.fileErr = false
+	p.loadFailed.Store(false)
 	if err := p.mpv.EnsureRunning(p.ctx); err != nil {
 		p.log.Printf("mpv restart failed: %v", err)
 		p.media = nil
@@ -700,11 +716,13 @@ func (p *Player) handleExit() {
 		return
 	}
 	p.mpv.SetProperty("keep-open", m.HasNext())
-	if err := p.mpv.LoadFile(p.ctx, url); err != nil {
+	id, err := p.mpv.LoadFile(p.ctx, url)
+	if err != nil {
 		p.log.Printf("mpv restart load: %v", err)
 		p.doNotHandlePause = false
 		return
 	}
+	p.entryID.Store(id)
 	p.waitForDuration(30 * time.Second)
 	p.mpv.SetProperty("force-media-title", v.ProperTitle())
 	p.configureStreams()
@@ -901,7 +919,7 @@ func abs(f float64) float64 {
 func (p *Player) waitForDuration(d time.Duration) bool {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		if p.fileErr {
+		if p.loadFailed.Load() {
 			return false
 		}
 		if x, err := p.mpv.GetProperty("duration"); err == nil && x != nil {

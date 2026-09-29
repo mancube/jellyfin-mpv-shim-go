@@ -32,11 +32,11 @@ type minimalMvp struct {
 func newMinimalMvp() *minimalMvp { return &minimalMvp{props: map[string]any{"duration": 100.0}} }
 
 func (m *minimalMvp) EnsureRunning(ctx context.Context) error { return nil }
-func (m *minimalMvp) LoadFile(ctx context.Context, u string) error {
+func (m *minimalMvp) LoadFile(ctx context.Context, u string) (int64, error) {
 	m.mu.Lock()
 	m.urls = append(m.urls, u)
 	m.mu.Unlock()
-	return nil
+	return 1, nil
 }
 func (m *minimalMvp) Stop() error { return nil }
 func (m *minimalMvp) SetProperty(n string, v any) {

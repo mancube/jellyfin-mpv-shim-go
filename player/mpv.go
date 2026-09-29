@@ -24,7 +24,10 @@ import (
 // tests use a fake. All methods are safe for concurrent use.
 type Mpv interface {
 	EnsureRunning(ctx context.Context) error
-	LoadFile(ctx context.Context, url string) error
+	// LoadFile replaces the playlist entry and returns the new entry's id.
+	// mpv reports that id in the end-file event, which is how the player tells
+	// an end-file for a file it replaced from one for what is playing.
+	LoadFile(ctx context.Context, url string) (int64, error)
 	Stop() error
 	SetProperty(name string, value any)
 	GetProperty(name string) (any, error)
@@ -452,10 +455,18 @@ func mpvError(raw json.RawMessage) error {
 	return nil
 }
 
-func (p *Proc) LoadFile(ctx context.Context, url string) error {
-	// loadfile replace — port of python-mpv play()
-	_, err := p.command("loadfile", url, "replace")
-	return err
+func (p *Proc) LoadFile(ctx context.Context, url string) (int64, error) {
+	// loadfile replace — port of python-mpv play(). mpv answers with the new
+	// entry's playlist_entry_id (verified on 0.41).
+	data, err := p.command("loadfile", url, "replace")
+	if err != nil {
+		return 0, err
+	}
+	var v struct {
+		PlaylistEntryID int64 `json:"playlist_entry_id"`
+	}
+	_ = json.Unmarshal(data, &v)
+	return v.PlaylistEntryID, nil
 }
 
 func (p *Proc) Stop() error {

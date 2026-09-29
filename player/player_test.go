@@ -31,6 +31,7 @@ type fakeMpv struct {
 	shots       []string
 	observed    []string
 	incarnation int
+	entry       int64 // playlist entry ids handed out by LoadFile
 	hookFn      func(string, json.RawMessage)
 	exit        chan struct{}
 	stopped     int
@@ -47,13 +48,15 @@ func (f *fakeMpv) EnsureRunning(ctx context.Context) error {
 	f.incarnation++ // a spawn: observers/bindings must be re-applied
 	return nil
 }
-func (f *fakeMpv) LoadFile(ctx context.Context, u string) error {
+func (f *fakeMpv) LoadFile(ctx context.Context, u string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loads = append(f.loads, u)
 	f.props["duration"] = 100.0
 	f.props["time-pos"] = 0.0
-	return nil
+	f.entry++ // mpv gives every load a new playlist entry id
+	f.props["playlist-entry-id"] = float64(f.entry)
+	return f.entry, nil
 }
 func (f *fakeMpv) Stop() error {
 	f.mu.Lock()
@@ -145,15 +148,21 @@ func (f *fakeMpv) changeProp(name string, value any) {
 	h("property-change", b)
 }
 
-// endFile fires the real end-file event with mpv 0.41's reason field.
-func (f *fakeMpv) endFile(reason string) {
+// endFile fires the real end-file event with mpv 0.41's reason field. The
+// entry id defaults to the entry the current load created (what mpv reports
+// for the file it ends); pass one to fire for a replaced entry.
+func (f *fakeMpv) endFile(reason string, entryID ...int64) {
 	f.mu.Lock()
 	h := f.hookFn
+	id := f.entry
 	f.mu.Unlock()
+	if len(entryID) > 0 {
+		id = entryID[0]
+	}
 	if h == nil {
 		return
 	}
-	b, _ := json.Marshal(map[string]any{"reason": reason})
+	b, _ := json.Marshal(map[string]any{"reason": reason, "playlist_entry_id": id})
 	h("end-file", b)
 }
 
@@ -477,6 +486,77 @@ func (f *fakeMpv) loadsTail() string {
 		return ""
 	}
 	return f.loads[len(f.loads)-1]
+}
+
+// Restarting a transcode (loadfile replace) makes mpv end the file it is
+// replacing. That end-file is not the new stream stopping: it must not tear
+// playback down, or a profile/track change silently ends the movie.
+func TestRestartIgnoresEndFileOfReplacedEntry(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	m, err := jfin.NewMedia(ctx, h.c, cfg(), []string{"a"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	waitFor(t, "start", func() bool {
+		p, _, _, _ := h.recs.snapshot()
+		return len(p) == 1
+	})
+	h.fm.SetProperty("time-pos", 6.0)
+	if !h.pl.Restart() {
+		t.Fatal("Restart returned false while playing")
+	}
+	waitFor(t, "re-request", func() bool { return h.fm.numLoads() == 2 })
+
+	// mpv ends the replaced entry (id 1) as part of the replace.
+	h.fm.endFile("stop", 1)
+	time.Sleep(100 * time.Millisecond)
+	if !h.pl.HasVideo() {
+		t.Error("the end-file of the replaced entry stopped the new playback")
+	}
+	h.fm.mu.Lock()
+	stopped := h.fm.stopped
+	h.fm.mu.Unlock()
+	if stopped != 0 {
+		t.Errorf("mpv was stopped %d times, want 0", stopped)
+	}
+
+	// The current entry ending for real still stops playback.
+	h.fm.endFile("stop", 2)
+	waitFor(t, "stop", func() bool { return !h.pl.HasVideo() })
+}
+
+// The IPC hook runs on mpv's reader goroutine — the same goroutine that
+// delivers command replies. If it waits for p.mu, every player holding p.mu
+// (a restart, a stop) stalls until its command times out: that is the freeze
+// a transcode re-request used to cause.
+func TestEventHookDoesNotBlockOnPlayerLock(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	m, err := jfin.NewMedia(ctx, h.c, cfg(), []string{"a"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	waitFor(t, "start", func() bool {
+		p, _, _, _ := h.recs.snapshot()
+		return len(p) == 1
+	})
+
+	h.pl.mu.Lock() // a player is mid-command
+	done := make(chan struct{})
+	go func() { h.fm.endFile("stop"); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleEvent blocked on p.mu")
+	}
+	h.pl.mu.Unlock()
 }
 
 func TestCrashRestart(t *testing.T) {
