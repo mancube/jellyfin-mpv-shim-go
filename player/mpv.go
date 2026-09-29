@@ -468,8 +468,11 @@ func (p *Proc) GetProperty(name string) (any, error) {
 	return v, nil
 }
 
+// SubAdd loads an external subtitle and selects it. The "cached" flag makes
+// re-adding the same file a re-select instead of stacking duplicate tracks
+// (configureStreams runs on every play/restart/track switch).
 func (p *Proc) SubAdd(url string) error {
-	_, err := p.command("sub-add", url)
+	_, err := p.command("sub-add", url, "cached")
 	return err
 }
 

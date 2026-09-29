@@ -84,6 +84,7 @@ func (f *fakeMpv) GetProperty(n string) (any, error) {
 func (f *fakeMpv) SubAdd(u string) error {
 	f.mu.Lock()
 	f.props["sub-add"] = u
+	f.cmds = append(f.cmds, "sub-add "+u+" cached")
 	f.mu.Unlock()
 	return nil
 }
@@ -1061,5 +1062,120 @@ func TestSubscribeEchoIsIgnored(t *testing.T) {
 	_, pr1, _, _ := h.recs.snapshot()
 	if got := pr1[len(pr1)-1].SubtitleStreamIndex; got != 2 {
 		t.Errorf("reported subtitle index = %d, want 2", got)
+	}
+}
+
+// --- bug-hunt regressions ---
+
+// A relative seek moves *by* the amount; lastPos must be the real position,
+// not the amount we sent.
+func TestRelativeSeekKeepsRealPosition(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.fm.SetProperty("time-pos", 100.0)
+	h.pl.Seek(-5, false) // relative
+	h.fm.mu.Lock()
+	cmds := strings.Join(h.fm.cmds, "|")
+	h.fm.mu.Unlock()
+	if !strings.Contains(cmds, "seek-5relative") {
+		t.Errorf("relative seek command = %q", cmds)
+	}
+	// The fake applies relative seeks, so our lastPos must match mpv.
+	h.pl.mu.Lock()
+	got := h.pl.lastPos
+	h.pl.mu.Unlock()
+	if got != 95 {
+		t.Errorf("lastPos = %v, want 95 (the position after the seek)", got)
+	}
+}
+
+// ESC outside the menu leaves fullscreen (upstream kb_menu_esc).
+func TestEscOutsideMenuLeavesFullscreen(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.fm.SetProperty("fullscreen", true)
+	h.pl.Key("back")
+	if h.fm.prop("fullscreen") != false {
+		t.Errorf("fullscreen = %v, want false", h.fm.prop("fullscreen"))
+	}
+}
+
+// Volume stepping must not clobber the volume when it cannot be read.
+func TestStepVolumeIgnoresUnknownVolume(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.fm.mu.Lock()
+	delete(h.fm.props, "volume") // mpv not answering
+	h.fm.mu.Unlock()
+	h.pl.StepVolume(10)
+	h.fm.mu.Lock()
+	_, set := h.fm.props["volume"]
+	h.fm.mu.Unlock()
+	if set {
+		t.Error("volume was written from an unknown current value")
+	}
+}
+
+// ESC/arrows must not act when there is no media (a stopped player).
+func TestKeysWithoutMediaAreNoops(t *testing.T) {
+	h := setup(t)
+	before := h.fm.numCmds()
+	for _, k := range []string{"left", "right", "up", "down", "back", "pause", "fullscreen"} {
+		h.pl.Key(k)
+	}
+	if h.fm.numCmds() != before {
+		t.Errorf("keys acted on an empty player: %d new commands", h.fm.numCmds()-before)
+	}
+	if h.pl.HasVideo() {
+		t.Error("a key press started playback")
+	}
+}
+
+// A load failure must still close the session: the server must not keep
+// showing us as playing, and our state must be clean afterwards.
+func TestLoadFailureStopsSession(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	_, _, stopped, _ := h.recs.snapshot()
+	n := len(stopped)
+
+	// mpv reports playback-abort (a failed load) and then end-file/error.
+	h.fm.SetProperty("playback-abort", true)
+	h.pl.Stop()
+
+	if h.pl.HasVideo() {
+		t.Error("media still set after a failed-load stop")
+	}
+	_, _, stopped2, _ := h.recs.snapshot()
+	if len(stopped2) != n+1 {
+		t.Errorf("no stop report after a failed load (%d → %d)", n, len(stopped2))
+	}
+	// And no key press may act on the dead session.
+	cmds := h.fm.numCmds()
+	h.pl.Key("left")
+	if h.fm.numCmds() != cmds {
+		t.Error("a key press acted on a dead session")
+	}
+}
+
+// External subtitles are re-added whenever configureStreams runs (play,
+// restart, track switch). mpv's "cached" flag makes that a re-select instead
+// of stacking a new copy of the same file, so the flag must be sent.
+func TestExternalSubtitleUsesCachedFlag(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	sid := 4 // the fixture's external subtitle
+	before := h.fm.numCmds()
+	for i := 0; i < 3; i++ {
+		h.pl.SetStreams(nil, &sid)
+	}
+	h.fm.mu.Lock()
+	cmds := strings.Join(h.fm.cmds[before:], "|")
+	h.fm.mu.Unlock()
+	if !strings.Contains(cmds, "sub-add") {
+		t.Fatalf("no sub-add issued: %q", cmds)
+	}
+	if !strings.Contains(cmds, "cached") {
+		t.Errorf("sub-add without the cached flag (would stack duplicates): %q", cmds)
 	}
 }

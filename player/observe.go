@@ -91,10 +91,16 @@ func (p *Player) onPropertyChange(prop string, data json.RawMessage) {
 		delete(p.initialEcho, prop)
 		return
 	}
-	if p.media == nil || !p.shouldSendTimeline || p.aborted() {
+	now := time.Now()
+	// time-pos fires several times a second: skip the extra IPC round-trips
+	// (aborted()) for those and let the cheap paths run.
+	if prop == "time-pos" {
+		if p.media == nil || !p.shouldSendTimeline || p.lastPause {
+			return
+		}
+	} else if p.media == nil || !p.shouldSendTimeline || p.aborted() {
 		return
 	}
-	now := time.Now()
 
 	// A state change we caused ourselves was already reported by the op that
 	// set it (SetPaused/SetMute/SetVolume/Seek) — echo suppression, port of

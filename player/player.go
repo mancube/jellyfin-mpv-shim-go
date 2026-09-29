@@ -183,12 +183,14 @@ func (p *Player) afterSpawn(ctx context.Context) {
 				p.initialEcho = map[string]bool{}
 				p.mu.Unlock()
 				for _, prop := range observedProps {
-					if err := p.mpv.Observe(prop); err != nil {
-						p.log.Printf("observe %s: %v", prop, err)
-					}
+					// Mark the echo before subscribing: mpv may answer with the
+					// current value before Observe() even returns.
 					p.mu.Lock()
 					p.initialEcho[prop] = true
 					p.mu.Unlock()
+					if err := p.mpv.Observe(prop); err != nil {
+						p.log.Printf("observe %s: %v", prop, err)
+					}
 				}
 				bound = id
 			}
@@ -292,16 +294,18 @@ func (p *Player) stopLocked() {
 	if p.media == nil {
 		return
 	}
-	if p.aborted() {
-		return
-	}
+	// An aborted playback (failed load, mpv gone) still has to be cleaned up:
+	// the server must hear the stop, or it keeps showing us as playing.
+	aborted := p.aborted()
 	p.shouldSendTimeline = false
 	opts := p.timelineOptions(false)
-	p.mpv.SetProperty("pause", false)
 	v := p.media.Video
 	p.media = nil
 	p.url = ""
-	_ = p.mpv.Stop()
+	if !aborted {
+		p.mpv.SetProperty("pause", false)
+		_ = p.mpv.Stop()
+	}
 	v.TerminateTranscode(p.ctx)
 	if err := v.M.C.SessionStopped(p.ctx, opts); err != nil {
 		p.log.Printf("session stopped: %v", err)
@@ -461,6 +465,7 @@ func (p *Player) eventLoop() {
 			continue
 		}
 		if ev.name == "end-file" {
+			p.menu.Hide() // the item is over; the menu belongs to it
 			p.mu.Lock()
 			p.onEndFileLocked(ev.reason)
 			p.mu.Unlock()
@@ -581,6 +586,20 @@ func (p *Player) handleExit() {
 	}
 	v := m.Video
 	pos, pause := p.lastPos, p.lastPause
+
+	// A transcode's HLS URL belongs to a PlaySessionId that may already be
+	// gone; re-running play() re-fetches PlaybackInfo and terminates the old
+	// encoding (upstream restart_playback). Direct play can reuse the URL.
+	if v.IsTranscode {
+		p.log.Printf("mpv crashed during transcode — re-requesting the stream")
+		if err := p.playLocked(m, pos); err != nil {
+			p.log.Printf("transcode restart: %v", err)
+			p.media = nil
+			p.shouldSendTimeline = false
+		}
+		return
+	}
+
 	p.doNotHandlePause = true
 	p.fileErr = false
 	if err := p.mpv.EnsureRunning(p.ctx); err != nil {

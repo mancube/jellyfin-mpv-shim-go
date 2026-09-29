@@ -90,6 +90,9 @@ func (p *Player) MenuAction(action string) {
 	switch action {
 	case "home":
 		p.menu.Show()
+	case "back":
+		// Upstream: ESC outside the menu leaves fullscreen.
+		p.setFullscreen(false)
 	case "up":
 		p.seekRelative(60)
 	case "down":
@@ -175,7 +178,16 @@ func (p *Player) seekLocked(pos float64, absolute bool) {
 		p.log.Printf("seek: %v", err)
 		return
 	}
-	p.lastPos = pos
+	if absolute {
+		p.lastPos = pos
+	} else {
+		// A relative seek moves by `pos` from wherever mpv is; ask it.
+		if x, err := p.mpv.GetProperty("time-pos"); err == nil {
+			if f, ok := x.(float64); ok {
+				p.lastPos = f
+			}
+		}
+	}
 	p.sendProgressLocked()
 }
 
@@ -234,6 +246,15 @@ func (p *Player) ToggleFullscreen() {
 	p.mpv.SetProperty("fullscreen", !on)
 }
 
+func (p *Player) setFullscreen(on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.media == nil {
+		return
+	}
+	p.mpv.SetProperty("fullscreen", on)
+}
+
 // Next plays the next item in the queue (upstream play_next).
 func (p *Player) Next() {
 	p.menu.Hide()
@@ -271,8 +292,16 @@ func (p *Player) jumpLocked(delta int) {
 }
 
 // StepVolume changes the volume by delta (remote VolumeUp/VolumeDown).
+// It no-ops when the current volume cannot be read: guessing 0 would mute.
 func (p *Player) StepVolume(delta int) {
-	p.SetVolume(p.GetVolume() + delta)
+	p.mu.Lock()
+	x, err := p.mpv.GetProperty("volume")
+	p.mu.Unlock()
+	f, ok := x.(float64)
+	if err != nil || !ok {
+		return
+	}
+	p.SetVolume(int(f) + delta)
 }
 
 // ToggleMute flips mute (remote ToggleMute).
