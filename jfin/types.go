@@ -35,6 +35,9 @@ type MediaStream struct {
 	IsExternal     bool   `json:"IsExternal"`
 	DeliveryMethod string `json:"DeliveryMethod"` // "Embed" | "External" | "Encode"
 	DeliveryUrl    string `json:"DeliveryUrl"`
+	// DisplayTitle is the server's human label ("English - ASS", "Croatian -
+	// SUBRIP - External"). Absent on some items, hence the menu fallbacks.
+	DisplayTitle string `json:"DisplayTitle"`
 }
 
 // MediaSource is one playable source of an item (a container on disk, or a

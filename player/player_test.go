@@ -1179,3 +1179,22 @@ func TestExternalSubtitleUsesCachedFlag(t *testing.T) {
 		t.Errorf("sub-add without the cached flag (would stack duplicates): %q", cmds)
 	}
 }
+
+// Menu labels come from the server's DisplayTitle when present, so a track is
+// recognisable instead of a bare language code.
+func TestMenuLabelsUseDisplayTitle(t *testing.T) {
+	cases := []struct {
+		s    jfin.MediaStream
+		want string
+	}{
+		{jfin.MediaStream{DisplayTitle: "English - ASS", Language: "eng"}, "English - ASS"},
+		{jfin.MediaStream{Title: "SDH", Language: "eng"}, "SDH"},
+		{jfin.MediaStream{Language: "hrv", IsExternal: true}, "hrv (external)"},
+		{jfin.MediaStream{Type: "Audio", Index: 7}, "Audio 7"},
+	}
+	for _, c := range cases {
+		if got := streamLabel(c.s); got != c.want {
+			t.Errorf("streamLabel(%+v) = %q, want %q", c.s, got, c.want)
+		}
+	}
+}

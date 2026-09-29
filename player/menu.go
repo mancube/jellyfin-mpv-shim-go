@@ -179,17 +179,22 @@ func (m *menu) push(title string, entries []menuEntry, selected int) {
 	m.refresh()
 }
 
-// streamLabel formats a track like upstream: DisplayTitle plus the raw title,
-// falling back to the language.
+// streamLabel formats a track for the menu, like upstream: the server's
+// DisplayTitle when present ("English - ASS", "Croatian - SUBRIP - External"),
+// else the raw title, else the language, else a type/index fallback. External
+// streams get a marker so it is obvious they are side-loaded files.
 func streamLabel(s jfin.MediaStream) string {
-	name := s.Title
+	name := s.DisplayTitle
+	if name == "" {
+		name = s.Title
+	}
 	if name == "" {
 		name = s.Language
 	}
 	if name == "" {
 		return fmt.Sprintf("%s %d", s.Type, s.Index)
 	}
-	if s.IsExternal {
+	if s.IsExternal && s.DisplayTitle == "" {
 		return fmt.Sprintf("%s (external)", name)
 	}
 	return name
