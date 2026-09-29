@@ -552,12 +552,13 @@ func (p *Player) Tick() {
 		pause, _ = x.(bool)
 	}
 	if pause {
-		// While paused we still report volume/mute changes (the remote can
-		// change them mid-pause); the position does not move.
+		// While paused we still report: the position does not move, but a
+		// pause the web UI did not ask for (mpv's own OSC/keymap) and
+		// volume/mute changes must still reach the remote panel.
 		p.lastPause = pause
 		// NB: no touchLocked() — a paused player is idle, and the idle check
 		// is what eventually stops it (upstream idle_when_paused/stop_idle).
-		if p.volumeChangedLocked() {
+		if pause != p.repPause || p.volumeChangedLocked() {
 			p.reportLocked()
 		}
 		return

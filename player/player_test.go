@@ -819,3 +819,29 @@ func TestConcurrentRemoteCommands(t *testing.T) {
 		}
 	}
 }
+
+// A pause that did not come from us (mpv's own OSC/keymap) must still reach
+// the web UI — upstream does this with a `pause` property observer.
+func TestExternalPauseIsReported(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.Tick() // baseline report
+	_, pr0, _, _ := h.recs.snapshot()
+	n := len(pr0)
+
+	h.fm.SetProperty("pause", true) // as if mpv paused itself
+	h.pl.Tick()
+	_, pr1, _, _ := h.recs.snapshot()
+	if len(pr1) != n+1 {
+		t.Fatalf("external pause not reported (%d → %d reports)", n, len(pr1))
+	}
+	if !pr1[len(pr1)-1].IsPaused {
+		t.Error("report does not carry IsPaused")
+	}
+	// No repeat reports while it stays paused.
+	h.pl.Tick()
+	_, pr2, _, _ := h.recs.snapshot()
+	if len(pr2) != len(pr1) {
+		t.Errorf("repeated reports while paused: %d → %d", len(pr1), len(pr2))
+	}
+}
