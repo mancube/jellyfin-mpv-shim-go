@@ -281,8 +281,12 @@ func (v *Video) PlaybackURL(ctx context.Context) (string, error) {
 	if m.Cfg.SkipIntro || m.Cfg.SkipCredits {
 		v.GetIntro(ctx, v.MediaSource.ID)
 	}
+	// Language rules fill in the tracks the caller (or the caller of the
+	// caller) did not ask for explicitly — a manual or remote track choice must
+	// survive a restart.
+	hadAid, hadSid := v.Aid != nil, v.Sid != nil
 	v.MapStreams()
-	v.applyLanguageRules()
+	v.applyLanguageRules(hadAid, hadSid)
 	url := v.urlFromSource()
 	// If the picked source is unplayable, try the rest (upstream fallback
 	// loop).
@@ -390,7 +394,7 @@ func (v *Video) urlFromSource() string {
 // applyLanguageRules picks aid/sid from the ordered language rules, then falls
 // back to the first stream whose language passes the filters. Port of upstream
 // language_config + lang_filter_audio/sub.
-func (v *Video) applyLanguageRules() {
+func (v *Video) applyLanguageRules(hadAid, hadSid bool) {
 	ms := v.MediaSource
 	if ms == nil {
 		return
@@ -403,12 +407,12 @@ func (v *Video) applyLanguageRules() {
 			continue
 		}
 		matched := false
-		if r.AudioLang != "" || r.AudioNone {
+		if (r.AudioLang != "" || r.AudioNone) && !hadAid {
 			if v.pickLanguage(r.AudioLang, r.AudioNone, "Audio") {
 				matched = true
 			}
 		}
-		if r.SubLang != "" || r.SubNone {
+		if (r.SubLang != "" || r.SubNone) && !hadSid {
 			if v.pickLanguage(r.SubLang, r.SubNone, "Subtitle") {
 				matched = true
 			}
@@ -420,10 +424,10 @@ func (v *Video) applyLanguageRules() {
 	// 2) no rule matched: apply the language filters, if configured. The list
 	// is a *filter* ("which languages may be used"), so we keep the first
 	// stream in file order whose language is in it.
-	if list := v.M.Cfg.LangFilterAudio; list != "" {
+	if list := v.M.Cfg.LangFilterAudio; list != "" && !hadAid {
 		v.pickLanguage(list, false, "Audio")
 	}
-	if list := v.M.Cfg.LangFilterSub; list != "" {
+	if list := v.M.Cfg.LangFilterSub; list != "" && !hadSid {
 		if v.pickLanguage(list, false, "Subtitle") {
 			return
 		}

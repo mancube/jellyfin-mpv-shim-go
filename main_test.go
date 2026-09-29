@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -331,7 +332,9 @@ func TestSettingsOptionsRoundTrip(t *testing.T) {
 	s.KeyBindings = map[string]string{"c": "fullscreen"}
 
 	before := s
-	applyOptionsToSettings(&s, playerOptions(&s))
+	settingsMu.Lock()
+	applyOptionsToSettings(&s, playerOptionsLocked(&s))
+	settingsMu.Unlock()
 	if !reflect.DeepEqual(before, s) {
 		t.Errorf("round trip changed the settings:\nbefore %+v\nafter  %+v", before, s)
 	}
@@ -361,7 +364,10 @@ func TestSettingsConcurrentAccess(t *testing.T) {
 			o := player.DefaultOptions()
 			o.AutoPlay = i%2 == 0
 			o.SeekRight = float64(i)
-			applyOptionsToSettings(&s, o)
+			// The production path: apply + persist under one lock.
+			if err := applyAndSave(&s, o, filepath.Join(t.TempDir(), "config.json")); err != nil {
+				return
+			}
 			_ = mediaConfig(&s)
 		}
 		close(stop)

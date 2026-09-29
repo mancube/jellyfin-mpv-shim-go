@@ -172,7 +172,7 @@ func (p *Player) idleCheckLocked() {
 	if p.idleStop <= 0 || p.stopping || p.media == nil {
 		return // nothing loaded: there is no playback to stop
 	}
-	_ = p.lastPause // a paused player is idle; the stop below handles it
+	// A paused player counts as idle; the stop below handles it.
 	if !p.aborted() && !p.lastPause {
 		p.touchLocked() // playing: not idle
 		return

@@ -134,13 +134,15 @@ func (p *Player) SetOptions(o Options) {
 	p.mu.Lock()
 	p.opt = o
 	p.mu.Unlock()
+	// Both of these live in mpv, so they only apply once it is up; playLocked
+	// re-applies the subtitle style for every file anyway.
+	if !p.mpv.Alive() {
+		return
+	}
 	if o.SubSize > 0 || o.SubColor != "" || o.SubPosition != "" {
 		p.ApplySubtitleStyle()
 	}
-	// Keybindings live in mpv: re-claim them if it is already running.
-	if p.mpv.Alive() {
-		p.BindKeys()
-	}
+	p.BindKeys() // keybindings live in mpv too
 }
 
 // Options returns the current options (for the UI to read/render).

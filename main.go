@@ -270,8 +270,22 @@ func mediaConfigLocked(s *Settings) jfin.MediaConfig {
 	}
 }
 
+// applyAndSave persists a preference-menu change atomically.
+func applyAndSave(s *Settings, o player.Options, cfgPath string) error {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	applyOptionsToSettings(s, o)
+	return s.Save(cfgPath)
+}
+
 // playerOptions maps the config onto the player's runtime options.
 func playerOptions(s *Settings) player.Options {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	return playerOptionsLocked(s)
+}
+
+func playerOptionsLocked(s *Settings) player.Options {
 	o := player.DefaultOptions()
 	o.Keys = s.Keys()
 	o.SeekUp, o.SeekDown, o.SeekLeft, o.SeekRight = s.SeekUp, s.SeekDown, s.SeekLeft, s.SeekRight
@@ -299,9 +313,9 @@ func playerOptions(s *Settings) player.Options {
 
 // applyOptionsToSettings copies the player's runtime options back into the
 // config, so a change made in the OSD preference menus survives a restart.
+// applyOptionsToSettings copies runtime options back into the config. Callers
+// hold settingsMu (see applyAndSave).
 func applyOptionsToSettings(s *Settings, o player.Options) {
-	settingsMu.Lock()
-	defer settingsMu.Unlock()
 	s.SeekUp, s.SeekDown, s.SeekLeft, s.SeekRight = o.SeekUp, o.SeekDown, o.SeekLeft, o.SeekRight
 	s.SeekHExact, s.SeekVExact, s.UseWebSeek = o.SeekHExact, o.SeekVExact, o.UseWebSeek
 	s.MediaKeySeek = o.MediaKeySeek
@@ -353,10 +367,10 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	pl.SetUpdateNotify(s.NotifyUpdates)
 	pl.SetSaveFunc(func(o player.Options) {
 		// The OSD preference menus change settings at runtime: copy the new
-		// options into the config and persist. (Called with the player's lock
-		// held, so it must not call back into the player.)
-		applyOptionsToSettings(s, o)
-		if err := s.Save(cfgPath); err != nil {
+		// options into the config and persist, under one lock so a concurrent
+		// change cannot interleave. (Called with the player's lock held, so it
+		// must not call back into the player.)
+		if err := applyAndSave(s, o, cfgPath); err != nil {
 			lg.Printf("saving config: %v", err)
 		}
 	})

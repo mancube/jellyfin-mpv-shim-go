@@ -464,7 +464,7 @@ func TestLanguageRulesAndFilters(t *testing.T) {
 		src := f.sources[0] // PlaybackURL would do this; set it directly here
 		m.Video.MediaSource = &src
 		m.Video.MapStreams()
-		m.Video.applyLanguageRules()
+		m.Video.applyLanguageRules(false, false)
 		return m.Video
 	}
 
@@ -509,5 +509,30 @@ func TestLanguageRulesAndFilters(t *testing.T) {
 	v = mk(MediaConfig{LangFilterAudio: "eng,jpn"})
 	if v.Aid == nil || *v.Aid != 1 {
 		t.Errorf("lang_filter_audio = %v, want 1 (first allowed stream in file order)", v.Aid)
+	}
+}
+
+// A language rule must not override a track the caller asked for: a manual or
+// remote selection has to survive a restart (re-running PlaybackURL).
+func TestLanguageRulesDoNotOverrideExplicitTracks(t *testing.T) {
+	f := newFixture(t)
+	f.sources = []MediaSource{{
+		ID: "src1", Protocol: "Http", SupportsDirectStream: true,
+		MediaStreams: []MediaStream{
+			{Type: "Audio", Index: 1, Language: "jpn"},
+			{Type: "Audio", Index: 2, Language: "eng"},
+		},
+	}}
+	eng := 2
+	m := newTestMediaWith(t, f.client(), "i1", false, MediaConfig{
+		LanguageRules: []LanguageRule{{AudioLang: "jpn", Enabled: true, Priority: 5}},
+	})
+	m.Video.Aid = &eng // the caller picked the English track
+	src := f.sources[0]
+	m.Video.MediaSource = &src
+	m.Video.MapStreams()
+	m.Video.applyLanguageRules(true, false)
+	if m.Video.Aid == nil || *m.Video.Aid != 2 {
+		t.Errorf("explicit audio choice overwritten: %v", m.Video.Aid)
 	}
 }
