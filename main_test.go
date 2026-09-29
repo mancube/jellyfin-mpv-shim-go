@@ -51,6 +51,7 @@ func (m *minimalMvp) Keybind(key, cmd string)     {}
 func (m *minimalMvp) Command(args ...any) error   { return nil }
 func (m *minimalMvp) Incarnation() int            { return 1 }
 func (m *minimalMvp) Screenshot(dir string) error { return nil }
+func (m *minimalMvp) Observe(name string) error   { return nil }
 func (m *minimalMvp) ShowText(t string, ms, level int) {
 }
 func (m *minimalMvp) Alive() bool { return true }

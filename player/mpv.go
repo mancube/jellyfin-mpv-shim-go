@@ -30,7 +30,8 @@ type Mpv interface {
 	GetProperty(name string) (any, error)
 	SubAdd(url string) error
 	ShowText(text string, ms, level int)
-	Keybind(key, cmd string) // bind a key to an mpv command ("" unbinds)
+	Keybind(key, cmd string)   // bind a key to an mpv command ("" unbinds)
+	Observe(name string) error // push property changes as property-change events
 	Command(args ...any) error
 	Screenshot(dir string) error
 	Alive() bool
@@ -56,6 +57,8 @@ type rpcMsg struct {
 	Event     string          `json:"event"`
 	Data      json.RawMessage `json:"data"`
 	Args      []string        `json:"args"` // client-message payload
+	Name      string          `json:"name"` // property-change
+	ID        *int64          `json:"id"`   // property-change
 	RequestID *int64          `json:"request_id"`
 	Error     json.RawMessage `json:"error"`
 }
@@ -72,6 +75,7 @@ type Proc struct {
 	logLevel   string
 	log        *log.Logger
 
+	obsMu       sync.Mutex // guards observeIDs
 	spawnMu     sync.Mutex // serializes respawns
 	mu          sync.Mutex
 	cmd         *exec.Cmd
@@ -304,6 +308,15 @@ func (p *Proc) readLoop() {
 					}
 				} else if m.Event != "" {
 					data := m.Data
+					if m.Event == "property-change" && m.Name != "" {
+						// Re-shape into {"name":…,"data":…} so the player hook
+						// sees one uniform payload.
+						b, _ := json.Marshal(struct {
+							Name string          `json:"name"`
+							Data json.RawMessage `json:"data"`
+						}{m.Name, m.Data})
+						data = b
+					}
 					if len(m.Args) > 0 {
 						// client-message carries "args", not "data".
 						b, _ := json.Marshal(m.Args)
@@ -449,6 +462,28 @@ func (p *Proc) Keybind(key, cmd string) {
 // Command runs a raw mpv IPC command.
 func (p *Proc) Command(args ...any) error {
 	_, err := p.command(args...)
+	return err
+}
+
+// observeIDs numbers the properties we watch, so a change event can be
+// attributed; mpv echoes the id back.
+var observeIDs = map[string]int64{
+	"pause": 1, "mute": 2, "volume": 3, "seeking": 4, "time-pos": 5, "eof-reached": 6,
+}
+
+// Observe subscribes to a property; changes arrive as
+// property-change {"name":…,"data":…} events. This is how the player learns
+// about state we did not cause (the web UI's play/pause, a seek bar drag) the
+// moment it happens, instead of on the next 5 s tick.
+func (p *Proc) Observe(name string) error {
+	p.obsMu.Lock()
+	id, ok := observeIDs[name]
+	if !ok {
+		id = int64(len(observeIDs) + 1)
+		observeIDs[name] = id
+	}
+	p.obsMu.Unlock()
+	_, err := p.command("observe_property", id, name) // note: id first
 	return err
 }
 

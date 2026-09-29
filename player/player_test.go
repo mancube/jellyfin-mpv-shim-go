@@ -28,6 +28,7 @@ type fakeMpv struct {
 	binds       []string
 	cmds        []string
 	shots       []string
+	observed    []string
 	incarnation int
 	hookFn      func(string, json.RawMessage)
 	exit        chan struct{}
@@ -42,6 +43,7 @@ func (f *fakeMpv) EnsureRunning(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.alive = true
+	f.incarnation++ // a spawn: observers/bindings must be re-applied
 	return nil
 }
 func (f *fakeMpv) LoadFile(ctx context.Context, u string) error {
@@ -117,6 +119,29 @@ func (f *fakeMpv) Screenshot(dir string) error {
 	f.shots = append(f.shots, dir)
 	return nil
 }
+
+// Observe records the subscription; changeProp simulates mpv's event.
+func (f *fakeMpv) Observe(name string) error {
+	f.mu.Lock()
+	f.observed = append(f.observed, name)
+	f.mu.Unlock()
+	return nil
+}
+
+// changeProp mimics mpv: the property already holds the new value when the
+// property-change event fires.
+func (f *fakeMpv) changeProp(name string, value any) {
+	f.mu.Lock()
+	f.props[name] = value
+	h := f.hookFn
+	f.mu.Unlock()
+	if h == nil {
+		return
+	}
+	b, _ := json.Marshal(map[string]any{"name": name, "data": value})
+	h("property-change", b)
+}
+
 func (f *fakeMpv) Incarnation() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -843,5 +868,88 @@ func TestExternalPauseIsReported(t *testing.T) {
 	_, pr2, _, _ := h.recs.snapshot()
 	if len(pr2) != len(pr1) {
 		t.Errorf("repeated reports while paused: %d → %d", len(pr1), len(pr2))
+	}
+}
+
+// M5 follow-up: property observers are the immediate feedback path, so a
+// local pause/seek/volume change must reach the server without waiting for the
+// 5 s timeline tick.
+func TestPropertyObserversReportImmediately(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	progress := func() []jfin.SessionInfo {
+		_, pr, _, _ := h.recs.snapshot()
+		return pr
+	}
+	base := len(progress())
+
+	// A pause we did not ask for (the web UI or mpv's own OSC).
+	h.fm.changeProp("pause", true)
+	waitFor(t, "pause report", func() bool { return len(progress()) > base })
+	if got := progress()[len(progress())-1]; !got.IsPaused {
+		t.Error("pause change not reported as paused")
+	}
+
+	// Echo suppression: the same value again must not report.
+	n := len(progress())
+	h.fm.changeProp("pause", true)
+	time.Sleep(50 * time.Millisecond)
+	if len(progress()) != n {
+		t.Error("duplicate pause change reported")
+	}
+
+	// A finished seek reports the new position right away.
+	h.fm.changeProp("time-pos", 80.0)
+	h.fm.changeProp("seeking", true) // drag start: no report // drag start: no report
+	if len(progress()) != n {
+		t.Error("seeking=true reported (drag in progress)")
+	}
+	h.fm.changeProp("seeking", false)
+	waitFor(t, "seek report", func() bool { return len(progress()) > n })
+	if got := progress()[len(progress())-1]; got.PositionTicks != 80*1e7 {
+		t.Errorf("position after seek = %d, want %d (reports: %+v)", got.PositionTicks, int64(80*1e7), progress())
+	}
+
+	// Volume change reports immediately too.
+	n = len(progress())
+	h.fm.changeProp("volume", 42.0)
+	waitFor(t, "volume report", func() bool { return len(progress()) > n })
+	if got := progress()[len(progress())-1].VolumeLevel; got != 42 {
+		t.Errorf("reported volume = %d, want 42", got)
+	}
+}
+
+// time-pos fires many times a second; position reports are throttled.
+func TestPositionReportsAreThrottled(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	_, pr0, _, _ := h.recs.snapshot()
+	base := len(pr0)
+	for i := 0; i < 40; i++ { // ~40 changes in a few ms
+		h.fm.changeProp("time-pos", float64(i))
+	}
+	time.Sleep(100 * time.Millisecond)
+	_, pr1, _, _ := h.recs.snapshot()
+	if got := len(pr1) - base; got > 1 {
+		t.Errorf("time-pos produced %d reports, want at most 1 (throttled)", got)
+	}
+}
+
+// The observers are (re)subscribed on every mpv incarnation.
+func TestObserversSubscribedAfterSpawn(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg()) // this spawned mpv
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		h.fm.mu.Lock()
+		got := append([]string(nil), h.fm.observed...)
+		h.fm.mu.Unlock()
+		if len(got) >= len(observedProps) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("observed %v, want %v", got, observedProps)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

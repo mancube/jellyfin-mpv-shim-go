@@ -40,10 +40,11 @@ type Player struct {
 	events             chan mpvEvent
 	menu               *menu
 	// last reported pause/mute/volume, to spot remote/UI-visible changes
-	repPause  bool
-	repMute   bool
-	repVolume float64
-	lastTick  time.Time
+	repPause   bool
+	repMute    bool
+	repVolume  float64
+	lastTick   time.Time
+	lastReport time.Time // last progress report we sent (report throttling)
 	// idle-stop: when > 0, playback is stopped after this long without
 	// activity (upstream stop_idle + idle_cmd_delay).
 	idleStop     time.Duration
@@ -59,6 +60,8 @@ type Player struct {
 type mpvEvent struct {
 	name string
 	args []string
+	prop string          // property-change: property name
+	data json.RawMessage // property-change: new value
 }
 
 func New(mpv Mpv, lg *log.Logger) *Player {
@@ -82,7 +85,7 @@ func (p *Player) Start(ctx context.Context) {
 	go p.eventLoop()
 	// Claim our keys as soon as mpv is up (retried on every spawn, since a
 	// crash respawn starts a fresh mpv with no bindings).
-	go p.bindKeysWhenAlive(ctx)
+	go p.afterSpawn(ctx)
 }
 
 // Status is a snapshot for the TUI/systray. Player is busy, so Status never
@@ -162,27 +165,39 @@ func (p *Player) HasVideo() bool {
 	return p.media != nil
 }
 
-// bindKeysWhenAlive waits for the first mpv spawn and claims the shim's keys.
-// Key bindings do not survive a crash respawn, so re-claim on every new
-// process (incarnation changes when EnsureRunning actually starts mpv).
-func (p *Player) bindKeysWhenAlive(ctx context.Context) {
+// afterSpawn sets up the per-process bits: the key bindings and the property
+// observers. Neither survives a crash respawn, so both are (re)applied on
+// every new mpv incarnation.
+func (p *Player) afterSpawn(ctx context.Context) {
 	bound := 0
 	for {
+		if p.mpv.Alive() {
+			if id := p.mpv.Incarnation(); id != bound {
+				p.BindKeys()
+				for _, prop := range observedProps {
+					if err := p.mpv.Observe(prop); err != nil {
+						p.log.Printf("observe %s: %v", prop, err)
+					}
+				}
+				bound = id
+			}
+		}
+		// 200 ms while there is no mpv (so the first spawn is picked up
+		// quickly), then idle at 1 s.
+		wait := time.Second
+		if !p.mpv.Alive() {
+			wait = 200 * time.Millisecond
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Second):
+		case <-time.After(wait):
 		}
-		if !p.mpv.Alive() {
-			continue
-		}
-		if id := p.mpv.Incarnation(); id == bound {
-			continue
-		}
-		p.BindKeys()
-		bound = p.mpv.Incarnation()
 	}
 }
+
+// observedProps are the mpv properties we watch for immediate UI feedback.
+var observedProps = []string{"pause", "mute", "volume", "seeking", "time-pos"}
 
 // Play loads the media's video into mpv and reports session start.
 // Port of upstream play + _play_media.
@@ -364,6 +379,19 @@ func (p *Player) handleEvent(name string, data json.RawMessage) {
 		default:
 		}
 		return
+	case "property-change":
+		var pc struct {
+			Name string          `json:"name"`
+			Data json.RawMessage `json:"data"`
+		}
+		if json.Unmarshal(data, &pc) != nil {
+			return
+		}
+		select {
+		case p.events <- mpvEvent{name: name, prop: pc.Name, data: pc.Data}:
+		default: // never drop a property change: they are the UI feedback
+		}
+		return
 	case "file-error":
 		failed = true
 	case "end-file":
@@ -395,6 +423,10 @@ func (p *Player) eventLoop() {
 	for ev := range p.events {
 		if ev.name == "client-message" {
 			p.handleClientMessage(ev.args)
+			continue
+		}
+		if ev.name == "property-change" {
+			p.onPropertyChange(ev.prop, ev.data)
 			continue
 		}
 		if ev.name == "file-error" {
@@ -610,6 +642,7 @@ func (p *Player) reportLocked() {
 		}
 	}
 	p.repPause = p.lastPause
+	p.lastReport = time.Now()
 	if err := p.media.C.SessionProgress(p.ctx, p.timelineOptions(false)); err != nil {
 		p.log.Printf("progress: %v", err)
 	}
