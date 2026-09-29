@@ -28,6 +28,10 @@ import (
 
 var version = "0.1.0-dev" // overridden via -ldflags "-X main.version=..."
 
+// defaultUpdateURL is where we look for releases of *this* project. Point
+// `update_url` in config.json somewhere else to use a different feed.
+const defaultUpdateURL = "https://git.nas.lan/api/v1/repos/ikac/jellyfin-mpv-shim-go/releases/latest"
+
 // logRemoteCommands mirrors every remote command we receive; -debug turns it on.
 // First thing to reach for when "the remote did the wrong thing".
 var logRemoteCommands bool
@@ -324,11 +328,11 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	pl := player.New(proc, lg)
 	pl.SetOptions(playerOptions(s))
 	pl.SetVersion(version)
+	// Our own release feed, never upstream's: this is the Go rewrite and must
+	// not report the Python shim's versions. Override with `update_url`.
 	updateURL := s.UpdateURL
 	if updateURL == "" && s.CheckUpdates {
-		// Upstream checks GitHub releases; point update_url at your own
-		// release feed to change that.
-		updateURL = "https://api.github.com/repos/jellyfin/jellyfin-mpv-shim/releases/latest"
+		updateURL = defaultUpdateURL
 	}
 	pl.SetUpdateURL(updateURL)
 	pl.SetUpdateEnabled(s.CheckUpdates)

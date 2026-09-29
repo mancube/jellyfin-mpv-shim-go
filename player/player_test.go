@@ -1480,3 +1480,62 @@ func TestUpdateCheckFindsNewerRelease(t *testing.T) {
 		t.Errorf("UpdateVersion = %q, want v9.9.9", got)
 	}
 }
+
+// The update check must read *our* release feed, and stay quiet when the repo
+// has no releases yet (a 404 is the normal state for a fresh repo).
+func TestUpdateCheckQuietWhenNoReleases(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	h := setup(t)
+	h.pl.SetVersion("0.1.0")
+	h.pl.SetUpdateURL(srv.URL)
+	h.pl.SetUpdateEnabled(true)
+	time.Sleep(300 * time.Millisecond) // one request, no retries
+	if h.pl.HasUpdate() {
+		t.Errorf("update announced with no releases: %q", h.pl.UpdateVersion())
+	}
+}
+
+// A tag-only feed (no release objects) is understood too.
+func TestUpdateCheckFallsBackToTags(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/releases/latest") {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]string{{"name": "v2.0.0"}})
+	}))
+	defer srv.Close()
+	h := setup(t)
+	h.pl.SetVersion("0.1.0")
+	h.pl.SetUpdateURL(srv.URL + "/api/v1/repos/x/y/releases/latest")
+	h.pl.SetUpdateEnabled(true)
+	deadline := time.Now().Add(3 * time.Second)
+	for !h.pl.HasUpdate() {
+		if time.Now().After(deadline) {
+			t.Fatal("tag-only feed not picked up")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := h.pl.UpdateVersion(); got != "v2.0.0" {
+		t.Errorf("UpdateVersion = %q, want v2.0.0", got)
+	}
+}
+
+// An older release must not be announced.
+func TestUpdateCheckIgnoresOlderRelease(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v3.0.0", "html_url": "u"})
+	}))
+	defer srv.Close()
+	h := setup(t)
+	h.pl.SetVersion("9.9.9")
+	h.pl.SetUpdateURL(srv.URL)
+	h.pl.SetUpdateEnabled(true)
+	time.Sleep(300 * time.Millisecond)
+	if h.pl.HasUpdate() {
+		t.Error("an older release was announced as an update")
+	}
+}

@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"mpv-shim/jfin"
@@ -79,23 +78,18 @@ type UpdateState struct {
 	Checked   time.Time
 }
 
-var (
-	updateMu    sync.Mutex
-	updateState UpdateState
-)
-
 // HasUpdate reports whether a newer release was found.
 func (p *Player) HasUpdate() bool {
-	updateMu.Lock()
-	defer updateMu.Unlock()
-	return updateState.Available
+	p.updMu.Lock()
+	defer p.updMu.Unlock()
+	return p.update.Available
 }
 
 // UpdateVersion returns the newest release tag we found.
 func (p *Player) UpdateVersion() string {
-	updateMu.Lock()
-	defer updateMu.Unlock()
-	return updateState.Version
+	p.updMu.Lock()
+	defer p.updMu.Unlock()
+	return p.update.Version
 }
 
 // SetVersion records our build version for the update comparison.
@@ -128,8 +122,9 @@ func (p *Player) SetUpdateEnabled(on bool) {
 }
 
 // CheckUpdate polls the update URL once in the background. It is a single
-// request with a short timeout: never block startup, never retry in a loop
-// (upstream polls once a day).
+// request with a short timeout: never block startup, never retry in a loop.
+// The URL defaults to *this project's* release feed (see main.go), not
+// upstream's — otherwise a Go shim would report the Python shim's releases.
 func (p *Player) CheckUpdate() {
 	if p.updateURL == "" || !p.updateEnabled {
 		return
@@ -137,40 +132,58 @@ func (p *Player) CheckUpdate() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.updateURL, nil)
-		if err != nil {
+		rel, err := p.fetchLatestRelease(ctx)
+		if err != nil || rel == "" || !newerThanCurrent(rel) {
 			return
+		}
+		p.updMu.Lock()
+		p.update = UpdateState{Available: true, Version: rel, URL: p.updateURL, Checked: time.Now()}
+		p.updMu.Unlock()
+		p.log.Printf("update available: %s (%s)", rel, p.updateURL)
+	}()
+}
+
+// fetchLatestRelease reads the newest release tag. It understands both shapes
+// the common forges expose: GitHub/Gitea "releases/latest" (tag_name) and a
+// plain "tags" list (name). A 404 simply means "no releases yet".
+func (p *Player) fetchLatestRelease(ctx context.Context) (string, error) {
+	get := func(url string, out any) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
 		}
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("User-Agent", "mpv-shim-go")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			p.log.Printf("update check: %v", err)
-			return
+			return err
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return
+			return fmt.Errorf("%s: %s", url, resp.Status)
 		}
 		b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		if err != nil {
-			return
+			return err
 		}
-		var rel struct {
-			TagName string `json:"tag_name"`
-			HTMLURL string `json:"html_url"`
+		return json.Unmarshal(b, out)
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := get(p.updateURL, &rel); err == nil && rel.TagName != "" {
+		return rel.TagName, nil
+	}
+	// No release object: fall back to the tag list (…/tags).
+	if tagsURL := strings.TrimSuffix(p.updateURL, "/latest"); strings.HasSuffix(tagsURL, "/releases") {
+		var tags []struct {
+			Name string `json:"name"`
 		}
-		if json.Unmarshal(b, &rel) != nil || rel.TagName == "" {
-			return
+		if err := get(tagsURL+"/../tags", &tags); err == nil && len(tags) > 0 {
+			return tags[0].Name, nil
 		}
-		if !newerThanCurrent(rel.TagName) {
-			return
-		}
-		updateMu.Lock()
-		updateState = UpdateState{Available: true, Version: rel.TagName, URL: rel.HTMLURL, Checked: time.Now()}
-		updateMu.Unlock()
-		p.log.Printf("update available: %s (%s)", rel.TagName, rel.HTMLURL)
-	}()
+	}
+	return "", fmt.Errorf("no release at %s", p.updateURL)
 }
 
 // currentVersion is set by SetVersion at startup; the package default keeps the
@@ -210,9 +223,9 @@ func compareVersions(a, b string) int {
 
 // OpenUpdatePage opens the release page in the browser (menu row, tray).
 func (p *Player) OpenUpdatePage() {
-	updateMu.Lock()
-	url := updateState.URL
-	updateMu.Unlock()
+	p.updMu.Lock()
+	url := p.update.URL
+	p.updMu.Unlock()
 	if url == "" {
 		return
 	}
@@ -223,14 +236,6 @@ func (p *Player) OpenUpdatePage() {
 
 // openUpdatePage opens the release page in the browser (menu row).
 func (m *menu) openUpdatePage() {
-	updateMu.Lock()
-	url := updateState.URL
-	updateMu.Unlock()
-	if url == "" {
-		return
-	}
 	m.Hide()
-	if err := openURL(url); err != nil {
-		m.p.log.Printf("open update page: %v", err)
-	}
+	m.p.OpenUpdatePage()
 }

@@ -33,6 +33,7 @@ jellyfin-web / mobile app
 | **Queue** | PlayNext/PlayLast, auto-advance on end-of-file, mark watched/unwatched, intro & credits skipping. |
 | **Resilience** | WebSocket reconnect with exponential backoff and a `/Sessions` health check; mpv crash → respawn and resume at the last position; transcode teardown; bounded crash-restart loop; idle stop. |
 | **Setup & status** | Bubble Tea TUI: add accounts with a password or Quick Connect, watch connection state and live playback, tail the log. Desktop systray with the same menu as upstream. |
+| **Update check** | One background request at startup against this project's own release feed; a newer version shows up in the TUI, the tray and the OSD menu. Never points at the Python shim's releases. |
 | **Headless** | `--headless` runs as a plain daemon: logs to stdout/file, no TUI, no tray. |
 
 Deliberately **not** included: music, live TV, the in-mpv library browser,
@@ -186,8 +187,8 @@ dot: green connected, amber reconnecting, grey offline.
 | `health_check_interval` | 300 | seconds between `/Sessions` health checks (0 disables) |
 | `connect_retry_mins` | 0 | give up reconnecting after N minutes (0 = forever) |
 | `sanitize_output` | true | redact tokens/api keys from the log |
-| `check_updates` / `notify_updates` | true | poll `update_url` for a newer release |
-| `update_url` | GitHub releases API | endpoint returning `{"tag_name","html_url"}` |
+| `check_updates` / `notify_updates` | true | look for a newer release of **this** project |
+| `update_url` | this repo's Gitea releases API | release feed; returns `{"tag_name"}` (a `…/tags` list also works) |
 | `play_cmd`, `pre_media_cmd`, `stop_cmd`, `media_ended_cmd`, `idle_cmd`, `idle_ended_cmd` | — | shell hooks run at those points in the playback lifecycle |
 
 Config and credentials live in `~/.config/mpv-shim/`, `%appdata%\mpv-shim\` or

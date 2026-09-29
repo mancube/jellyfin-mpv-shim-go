@@ -64,6 +64,8 @@ type Player struct {
 	// update check (upstream update_check.py)
 	updateURL     string
 	updateEnabled bool
+	updMu         sync.Mutex
+	update        UpdateState
 	version       string
 	// PauseReport mirrors the pause_report setting: report immediately when
 	// the remote pauses/unpauses.
