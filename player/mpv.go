@@ -4,6 +4,7 @@ package player
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -374,6 +375,16 @@ func (p *Proc) readLoop() {
 						p.mu.Lock()
 						p.graceful = true
 						p.mu.Unlock()
+					}
+					if len(data) == 0 {
+						// Most events carry their fields at the top level of
+						// the event object (end-file's reason /
+						// playlist_entry_id, start-file's …), not inside
+						// "data" — so there is nothing in m.Data to pass on.
+						// Hand the hook the whole event object: it is what
+						// made every end-file look reason-less (and therefore
+						// like a "stop") to the player.
+						data = json.RawMessage(bytes.TrimSpace(line))
 					}
 					p.mu.Lock()
 					hook := p.hook
