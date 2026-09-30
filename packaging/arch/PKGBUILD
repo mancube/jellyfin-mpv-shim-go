@@ -7,7 +7,7 @@
 #   pacman -R mpv-shim-go
 
 pkgname=mpv-shim-go
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Jellyfin v12 cast client for mpv — remote control, OSD menu, TUI and tray"
 arch=('x86_64' 'aarch64')
@@ -22,14 +22,14 @@ sha256sums=()
 
 # The version tracks the git checkout, so `git pull` + rebuild is enough.
 # makepkg forbids hyphens/spaces in a version, so the commit and the dirty
-# flag are folded into pkgrel: 0.1.0.r<commits>.g<sha>[.dirty].
+# flag are folded into pkgrel: 1.0.0.r<commits>.g<sha>[.dirty].
 pkgver() {
   cd "$startdir" || return 1
   local v=""
   if git rev-parse --git-dir >/dev/null 2>&1; then
     v=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
   fi
-  echo "${v:-0.1.0}"   # no tag yet: fall back to the declared version
+  echo "${v:-1.0.0}"   # no tag yet: fall back to the declared version
 }
 
 pkgrel() {

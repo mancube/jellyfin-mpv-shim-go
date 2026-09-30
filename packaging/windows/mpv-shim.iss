@@ -1,8 +1,8 @@
 ; Inno Setup script — build the Windows installer on a Windows machine with
 ; Inno Setup 6 (https://jrsoftware.org/isinfo.php), e.g.:
 ;
-;   go build -tags nosystray -ldflags "-X main.version=0.1.0" -o build\mpv-shim.exe .
-;   iscc /DMyAppVersion=0.1.0 packaging\windows\mpv-shim.iss
+;   go build -tags nosystray -ldflags "-X main.version=1.0.0" -o build\mpv-shim.exe .
+;   iscc /DMyAppVersion=1.0.0 packaging\windows\mpv-shim.iss
 ;
 ; Produces mpv-shim-<version>-setup.exe. Silent install: /VERYSILENT
 ; Remove again from Settings → Apps, or with: uninstall.exe /VERYSILENT
@@ -11,7 +11,7 @@
 #define MyAppPublisher "mpv-shim-go contributors"
 #define MyAppExeName "mpv-shim.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "1.0.0"
 #endif
 
 [Setup]

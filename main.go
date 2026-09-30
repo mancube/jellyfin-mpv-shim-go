@@ -26,7 +26,7 @@ import (
 	"mpv-shim/ui"
 )
 
-var version = "0.1.0-dev" // overridden via -ldflags "-X main.version=..."
+var version = "1.0.0" // overridden via -ldflags "-X main.version=..."
 
 // defaultUpdateURL is where we look for releases of *this* project. Point
 // `update_url` in config.json somewhere else to use a different feed.

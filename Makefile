@@ -1,7 +1,7 @@
 # mpv-shim-go — build, test, install. Packaging helpers live in packaging/.
 
 BINARY  := mpv-shim
-VERSION ?= 0.1.0
+VERSION ?= 1.0.0
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 APPDIR  := /usr/share/applications

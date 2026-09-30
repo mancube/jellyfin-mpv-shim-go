@@ -3,7 +3,7 @@
 # installer, no admin rights — unzip anywhere and run mpv-shim.exe.
 # Run from the repository root on any OS with Go installed.
 set -eu
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-1.0.0}"
 OUT="dist/mpv-shim-${VERSION}-windows-amd64"
 
 cd "$(dirname "$0")/../.."
