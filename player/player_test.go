@@ -239,11 +239,15 @@ func (f *fakeMpv) lastText() string {
 }
 
 type recs struct {
-	mu       sync.Mutex
-	playing  []jfin.SessionInfo
-	progress []jfin.SessionInfo
-	stopped  []jfin.SessionInfo
-	watched  []string
+	mu        sync.Mutex
+	playing   []jfin.SessionInfo
+	progress  []jfin.SessionInfo
+	stopped   []jfin.SessionInfo
+	watched   []string
+	encodings []string // PlaySessionIds passed to DELETE /Videos/ActiveEncodings
+	events    []string // "info:ps2" / "del:ps1" in call order
+	transcode bool     // serve a source that can only be transcoded
+	infoN     int      // PlaybackInfo calls, for a fresh PlaySessionId each time
 }
 
 func (r *recs) snapshot() (p, pr, s []jfin.SessionInfo, w []string) {
@@ -270,6 +274,15 @@ func testSource() jfin.MediaSource {
 	}
 }
 
+// testTranscodeSource is a source only the server can serve transcoded, so
+// the item ends up on a transcode URL (with a PlaySessionId to clean up).
+func testTranscodeSource() jfin.MediaSource {
+	s := testSource()
+	s.SupportsDirectPlay, s.SupportsDirectStream = false, false
+	s.TranscodingUrl = "/videos/a/master.m3u8?PlaySessionId=ps"
+	return s
+}
+
 var runTimeTicks = int64(1_000_000_000) // 100 s
 
 func testServer(t *testing.T, r *recs) *httptest.Server {
@@ -279,9 +292,20 @@ func testServer(t *testing.T, r *recs) *httptest.Server {
 		p := req.URL.Path
 		switch {
 		case strings.HasSuffix(p, "/PlaybackInfo"):
+			src := testSource()
+			ps := "ps"
+			if r.transcode {
+				src = testTranscodeSource()
+				r.mu.Lock()
+				r.infoN++
+				ps = fmt.Sprintf("ps%d", r.infoN)
+				r.events = append(r.events, "info:"+ps)
+				r.mu.Unlock()
+				src.TranscodingUrl = "/videos/a/master.m3u8?PlaySessionId=" + ps
+			}
 			_ = json.NewEncoder(w).Encode(jfin.PlaybackInfo{
-				PlaySessionId: "ps",
-				MediaSources:  []jfin.MediaSource{testSource()},
+				PlaySessionId: ps,
+				MediaSources:  []jfin.MediaSource{src},
 			})
 		case strings.Contains(p, "/Items/"):
 			id := p[strings.LastIndex(p, "/")+1:]
@@ -323,6 +347,11 @@ func testServer(t *testing.T, r *recs) *httptest.Server {
 				{Type: "Intro", StartTicks: 0, EndTicks: 30 * 1e7},
 			}})
 		case p == "/Videos/ActiveEncodings":
+			ps := req.URL.Query().Get("PlaySessionId")
+			r.mu.Lock()
+			r.encodings = append(r.encodings, ps)
+			r.events = append(r.events, "del:"+ps)
+			r.mu.Unlock()
 			w.WriteHeader(204)
 		default:
 			w.WriteHeader(200)
@@ -584,6 +613,45 @@ func TestRestartUsesTheCurrentConfig(t *testing.T) {
 	}
 	if m.Cfg.RemoteKbps != 2000 || !m.Cfg.AlwaysTranscode {
 		t.Errorf("re-request used %+v, want the current config (2000 kbps, always transcode)", m.Cfg)
+	}
+}
+
+// A re-request must stop the encoding of the stream mpv was reading *after*
+// mpv has moved on: terminating it while mpv still polls the old URL makes the
+// server start ffmpeg for that job again, and the second encoding is never
+// cleaned up.
+func TestRestartStopsTheOldEncoding(t *testing.T) {
+	h := setup(t)
+	h.recs.transcode = true
+	ctx := context.Background()
+	m, err := jfin.NewMedia(ctx, h.c, cfg(), []string{"a"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	if !m.Video.IsTranscode {
+		t.Fatal("expected a transcode URL")
+	}
+	if !h.pl.Restart() {
+		t.Fatal("Restart returned false while playing")
+	}
+	h.recs.mu.Lock()
+	defer h.recs.mu.Unlock()
+	// The first play's encoding is stopped twice: once when the re-request
+	// starts (mpv is still polling it then — the server would just start
+	// ffmpeg again) and once after, when mpv has moved on.
+	if n := strings.Count(strings.Join(h.recs.events, ","), "del:ps1"); n != 2 {
+		t.Errorf("events = %v, want ps1 stopped before and after the re-request", h.recs.events)
+	}
+	reRequested, stoppedAfter := false, false
+	for _, e := range h.recs.events {
+		reRequested = reRequested || e == "info:ps2"
+		stoppedAfter = stoppedAfter || (reRequested && e == "del:ps1")
+	}
+	if !stoppedAfter {
+		t.Errorf("events = %v, want ps1 stopped after the re-request (ps2)", h.recs.events)
 	}
 }
 

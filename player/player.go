@@ -304,6 +304,13 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	p.shouldSendTimeline = false
 	p.start = time.Now()
 	p.runShell("pre_media_cmd", p.opt.ShellCmds.PreMedia)
+	// The encoding behind the stream we are replacing. PlaybackURL stops it
+	// before the re-request, but that is too early here: mpv keeps polling
+	// the old URL until we load the new one, and the server answers those
+	// requests by starting ffmpeg *again* for the job we just stopped — two
+	// encodings, one of them invisible and never cleaned up. So remember the
+	// session and stop it again once mpv has moved on.
+	oldSession := v.TranscodeSession()
 	url, err := v.PlaybackURL(p.ctx)
 	if err != nil {
 		return fmt.Errorf("playback url: %w", err)
@@ -329,6 +336,9 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 		return err
 	}
 	p.entryID.Store(id)
+	if oldSession != "" {
+		_ = v.M.C.CloseTranscode(p.ctx, oldSession)
+	}
 	if !p.waitForDuration(p.timeoutLocked()) {
 		p.doNotHandlePause = false
 		p.stopLocked()
