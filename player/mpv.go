@@ -4,6 +4,7 @@ package player
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -24,7 +25,10 @@ import (
 // tests use a fake. All methods are safe for concurrent use.
 type Mpv interface {
 	EnsureRunning(ctx context.Context) error
-	LoadFile(ctx context.Context, url string) error
+	// LoadFile replaces the playlist entry and returns the new entry's id.
+	// mpv reports that id in the end-file event, which is how the player tells
+	// an end-file for a file it replaced from one for what is playing.
+	LoadFile(ctx context.Context, url string) (int64, error)
 	Stop() error
 	SetProperty(name string, value any)
 	GetProperty(name string) (any, error)
@@ -33,7 +37,7 @@ type Mpv interface {
 	Keybind(key, cmd string)   // bind a key to an mpv command ("" unbinds)
 	Observe(name string) error // push property changes as property-change events
 	Command(args ...any) error
-	Screenshot(dir string) error
+	Screenshot(dir string) (string, error)
 	Alive() bool
 	Incarnation() int // spawn counter: changes when mpv (re)started
 	Graceful() bool
@@ -372,6 +376,16 @@ func (p *Proc) readLoop() {
 						p.graceful = true
 						p.mu.Unlock()
 					}
+					if len(data) == 0 {
+						// Most events carry their fields at the top level of
+						// the event object (end-file's reason /
+						// playlist_entry_id, start-file's …), not inside
+						// "data" — so there is nothing in m.Data to pass on.
+						// Hand the hook the whole event object: it is what
+						// made every end-file look reason-less (and therefore
+						// like a "stop") to the player.
+						data = json.RawMessage(bytes.TrimSpace(line))
+					}
 					p.mu.Lock()
 					hook := p.hook
 					p.mu.Unlock()
@@ -452,10 +466,18 @@ func mpvError(raw json.RawMessage) error {
 	return nil
 }
 
-func (p *Proc) LoadFile(ctx context.Context, url string) error {
-	// loadfile replace — port of python-mpv play()
-	_, err := p.command("loadfile", url, "replace")
-	return err
+func (p *Proc) LoadFile(ctx context.Context, url string) (int64, error) {
+	// loadfile replace — port of python-mpv play(). mpv answers with the new
+	// entry's playlist_entry_id (verified on 0.41).
+	data, err := p.command("loadfile", url, "replace")
+	if err != nil {
+		return 0, err
+	}
+	var v struct {
+		PlaylistEntryID int64 `json:"playlist_entry_id"`
+	}
+	_ = json.Unmarshal(data, &v)
+	return v.PlaylistEntryID, nil
 }
 
 func (p *Proc) Stop() error {
@@ -541,19 +563,29 @@ func (p *Proc) Observe(name string) error {
 	return err
 }
 
-// Screenshot writes a video frame into dir (upstream's TakeScreenshot).
-// mpv 0.41 dropped `screenshot-to-file` and the old flag/argument form: the
-// destination comes from the screenshot-template option now.
-func (p *Proc) Screenshot(dir string) error {
+// Screenshot writes one video frame into dir and returns the file it wrote.
+//
+// `screenshot-to-file` is still a *command* in mpv 0.41 (the property of that
+// name is gone, which is what made the old implementation look broken), while
+// the `screenshot` command goes through the screenshot-template option and
+// fails outright on some builds/VO combinations. So: try the direct command,
+// and fall back to the template route for older mpv.
+func (p *Proc) Screenshot(dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return "", err
+	}
+	name := filepath.Join(dir, fmt.Sprintf("shot-%s.png", time.Now().Format("20060102-150405.000")))
+	if _, err := p.command("screenshot-to-file", name); err == nil {
+		return name, nil
 	}
 	tmpl := filepath.Join(dir, "shot-%03d.jpg")
 	if _, err := p.command("set_property", "screenshot-template", tmpl); err != nil {
-		return fmt.Errorf("screenshot-template: %w", err)
+		return "", fmt.Errorf("screenshot: %w", err)
 	}
-	_, err := p.command("screenshot", "video")
-	return err
+	if _, err := p.command("screenshot", "video"); err != nil {
+		return "", fmt.Errorf("screenshot: %w", err)
+	}
+	return tmpl, nil
 }
 
 // Kill terminates the process: SIGTERM, escalating to SIGKILL after 3s.

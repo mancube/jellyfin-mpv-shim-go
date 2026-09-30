@@ -239,7 +239,7 @@ func (v *Video) PlaybackURL(ctx context.Context) (string, error) {
 		RemoteKbps:           m.Cfg.RemoteKbps,
 		TranscodeH265:        m.Cfg.TranscodeH265,
 		ForceH264:            m.Cfg.ForceH264,
-		AlwaysTranscode:      m.Cfg.AlwaysTranscode,
+		ForceTranscode:       m.Cfg.AlwaysTranscode,
 		TranscodeHi10p:       m.Cfg.TranscodeHi10p,
 		TranscodeHDR:         m.Cfg.TranscodeHDR,
 		TranscodeDolbyVision: m.Cfg.TranscodeDolbyVision,
@@ -622,6 +622,15 @@ func (v *Video) SetStreams(aid, sid *int) bool {
 // TerminateTranscode tears down any transcode session tied to this video
 // (DELETE ActiveEncodings, or close the live stream). Port of upstream
 // terminate_transcode.
+// TranscodeSession is the PlaySessionId of the encoding the current stream
+// came from, or "" when there is none (direct play, or nothing played yet).
+func (v *Video) TranscodeSession() string {
+	if !v.IsTranscode || v.PlaybackInfo == nil {
+		return ""
+	}
+	return v.PlaybackInfo.PlaySessionId
+}
+
 func (v *Video) TerminateTranscode(ctx context.Context) {
 	if !v.IsTranscode {
 		return

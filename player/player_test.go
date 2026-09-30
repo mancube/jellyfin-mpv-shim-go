@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ type fakeMpv struct {
 	shots       []string
 	observed    []string
 	incarnation int
+	entry       int64 // playlist entry ids handed out by LoadFile
 	hookFn      func(string, json.RawMessage)
 	exit        chan struct{}
 	stopped     int
@@ -46,13 +48,15 @@ func (f *fakeMpv) EnsureRunning(ctx context.Context) error {
 	f.incarnation++ // a spawn: observers/bindings must be re-applied
 	return nil
 }
-func (f *fakeMpv) LoadFile(ctx context.Context, u string) error {
+func (f *fakeMpv) LoadFile(ctx context.Context, u string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loads = append(f.loads, u)
 	f.props["duration"] = 100.0
 	f.props["time-pos"] = 0.0
-	return nil
+	f.entry++ // mpv gives every load a new playlist entry id
+	f.props["playlist-entry-id"] = float64(f.entry)
+	return f.entry, nil
 }
 func (f *fakeMpv) Stop() error {
 	f.mu.Lock()
@@ -114,11 +118,12 @@ func (f *fakeMpv) Command(args ...any) error {
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeMpv) Screenshot(dir string) error {
+func (f *fakeMpv) Screenshot(dir string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.shots = append(f.shots, dir)
-	return nil
+	f.cmds = append(f.cmds, "screenshot-to-file "+dir+"/shot.png")
+	return filepath.Join(dir, "shot.png"), nil
 }
 
 // Observe records the subscription; changeProp simulates mpv's event.
@@ -143,15 +148,21 @@ func (f *fakeMpv) changeProp(name string, value any) {
 	h("property-change", b)
 }
 
-// endFile fires the real end-file event with mpv 0.41's reason field.
-func (f *fakeMpv) endFile(reason string) {
+// endFile fires the real end-file event with mpv 0.41's reason field. The
+// entry id defaults to the entry the current load created (what mpv reports
+// for the file it ends); pass one to fire for a replaced entry.
+func (f *fakeMpv) endFile(reason string, entryID ...int64) {
 	f.mu.Lock()
 	h := f.hookFn
+	id := f.entry
 	f.mu.Unlock()
+	if len(entryID) > 0 {
+		id = entryID[0]
+	}
 	if h == nil {
 		return
 	}
-	b, _ := json.Marshal(map[string]any{"reason": reason})
+	b, _ := json.Marshal(map[string]any{"reason": reason, "playlist_entry_id": id})
 	h("end-file", b)
 }
 
@@ -228,11 +239,15 @@ func (f *fakeMpv) lastText() string {
 }
 
 type recs struct {
-	mu       sync.Mutex
-	playing  []jfin.SessionInfo
-	progress []jfin.SessionInfo
-	stopped  []jfin.SessionInfo
-	watched  []string
+	mu        sync.Mutex
+	playing   []jfin.SessionInfo
+	progress  []jfin.SessionInfo
+	stopped   []jfin.SessionInfo
+	watched   []string
+	encodings []string // PlaySessionIds passed to DELETE /Videos/ActiveEncodings
+	events    []string // "info:ps2" / "del:ps1" in call order
+	transcode bool     // serve a source that can only be transcoded
+	infoN     int      // PlaybackInfo calls, for a fresh PlaySessionId each time
 }
 
 func (r *recs) snapshot() (p, pr, s []jfin.SessionInfo, w []string) {
@@ -259,6 +274,15 @@ func testSource() jfin.MediaSource {
 	}
 }
 
+// testTranscodeSource is a source only the server can serve transcoded, so
+// the item ends up on a transcode URL (with a PlaySessionId to clean up).
+func testTranscodeSource() jfin.MediaSource {
+	s := testSource()
+	s.SupportsDirectPlay, s.SupportsDirectStream = false, false
+	s.TranscodingUrl = "/videos/a/master.m3u8?PlaySessionId=ps"
+	return s
+}
+
 var runTimeTicks = int64(1_000_000_000) // 100 s
 
 func testServer(t *testing.T, r *recs) *httptest.Server {
@@ -268,9 +292,20 @@ func testServer(t *testing.T, r *recs) *httptest.Server {
 		p := req.URL.Path
 		switch {
 		case strings.HasSuffix(p, "/PlaybackInfo"):
+			src := testSource()
+			ps := "ps"
+			if r.transcode {
+				src = testTranscodeSource()
+				r.mu.Lock()
+				r.infoN++
+				ps = fmt.Sprintf("ps%d", r.infoN)
+				r.events = append(r.events, "info:"+ps)
+				r.mu.Unlock()
+				src.TranscodingUrl = "/videos/a/master.m3u8?PlaySessionId=" + ps
+			}
 			_ = json.NewEncoder(w).Encode(jfin.PlaybackInfo{
-				PlaySessionId: "ps",
-				MediaSources:  []jfin.MediaSource{testSource()},
+				PlaySessionId: ps,
+				MediaSources:  []jfin.MediaSource{src},
 			})
 		case strings.Contains(p, "/Items/"):
 			id := p[strings.LastIndex(p, "/")+1:]
@@ -312,6 +347,11 @@ func testServer(t *testing.T, r *recs) *httptest.Server {
 				{Type: "Intro", StartTicks: 0, EndTicks: 30 * 1e7},
 			}})
 		case p == "/Videos/ActiveEncodings":
+			ps := req.URL.Query().Get("PlaySessionId")
+			r.mu.Lock()
+			r.encodings = append(r.encodings, ps)
+			r.events = append(r.events, "del:"+ps)
+			r.mu.Unlock()
 			w.WriteHeader(204)
 		default:
 			w.WriteHeader(200)
@@ -475,6 +515,144 @@ func (f *fakeMpv) loadsTail() string {
 		return ""
 	}
 	return f.loads[len(f.loads)-1]
+}
+
+// Restarting a transcode (loadfile replace) makes mpv end the file it is
+// replacing. That end-file is not the new stream stopping: it must not tear
+// playback down, or a profile/track change silently ends the movie.
+func TestRestartIgnoresEndFileOfReplacedEntry(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	m, err := jfin.NewMedia(ctx, h.c, cfg(), []string{"a"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	waitFor(t, "start", func() bool {
+		p, _, _, _ := h.recs.snapshot()
+		return len(p) == 1
+	})
+	h.fm.SetProperty("time-pos", 6.0)
+	if !h.pl.Restart() {
+		t.Fatal("Restart returned false while playing")
+	}
+	waitFor(t, "re-request", func() bool { return h.fm.numLoads() == 2 })
+
+	// mpv ends the replaced entry (id 1) as part of the replace.
+	h.fm.endFile("stop", 1)
+	time.Sleep(100 * time.Millisecond)
+	if !h.pl.HasVideo() {
+		t.Error("the end-file of the replaced entry stopped the new playback")
+	}
+	h.fm.mu.Lock()
+	stopped := h.fm.stopped
+	h.fm.mu.Unlock()
+	if stopped != 0 {
+		t.Errorf("mpv was stopped %d times, want 0", stopped)
+	}
+
+	// The current entry ending for real still stops playback.
+	h.fm.endFile("stop", 2)
+	waitFor(t, "stop", func() bool { return !h.pl.HasVideo() })
+}
+
+// The IPC hook runs on mpv's reader goroutine — the same goroutine that
+// delivers command replies. If it waits for p.mu, every player holding p.mu
+// (a restart, a stop) stalls until its command times out: that is the freeze
+// a transcode re-request used to cause.
+func TestEventHookDoesNotBlockOnPlayerLock(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	m, err := jfin.NewMedia(ctx, h.c, cfg(), []string{"a"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	waitFor(t, "start", func() bool {
+		p, _, _, _ := h.recs.snapshot()
+		return len(p) == 1
+	})
+
+	h.pl.mu.Lock() // a player is mid-command
+	done := make(chan struct{})
+	go func() { h.fm.endFile("stop"); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleEvent blocked on p.mu")
+	}
+	h.pl.mu.Unlock()
+}
+
+// A re-request must ask the server with the profile that is set *now*: the
+// item carries the config it was built with, so without the live config a
+// profile change would just get the same stream back.
+func TestRestartUsesTheCurrentConfig(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	m, err := jfin.NewMedia(ctx, h.c, cfg(), []string{"a"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	if m.Cfg.RemoteKbps != 25000 {
+		t.Fatalf("play used RemoteKbps = %d", m.Cfg.RemoteKbps)
+	}
+	// The preference menus change the settings behind our back.
+	h.pl.SetLiveConfig(func() jfin.MediaConfig {
+		return jfin.MediaConfig{LocalKbps: 10000, RemoteKbps: 2000, AlwaysTranscode: true}
+	})
+	if !h.pl.Restart() {
+		t.Fatal("Restart returned false while playing")
+	}
+	if m.Cfg.RemoteKbps != 2000 || !m.Cfg.AlwaysTranscode {
+		t.Errorf("re-request used %+v, want the current config (2000 kbps, always transcode)", m.Cfg)
+	}
+}
+
+// A re-request must stop the encoding of the stream mpv was reading *after*
+// mpv has moved on: terminating it while mpv still polls the old URL makes the
+// server start ffmpeg for that job again, and the second encoding is never
+// cleaned up.
+func TestRestartStopsTheOldEncoding(t *testing.T) {
+	h := setup(t)
+	h.recs.transcode = true
+	ctx := context.Background()
+	m, err := jfin.NewMedia(ctx, h.c, cfg(), []string{"a"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	if !m.Video.IsTranscode {
+		t.Fatal("expected a transcode URL")
+	}
+	if !h.pl.Restart() {
+		t.Fatal("Restart returned false while playing")
+	}
+	h.recs.mu.Lock()
+	defer h.recs.mu.Unlock()
+	// The first play's encoding is stopped twice: once when the re-request
+	// starts (mpv is still polling it then — the server would just start
+	// ffmpeg again) and once after, when mpv has moved on.
+	if n := strings.Count(strings.Join(h.recs.events, ","), "del:ps1"); n != 2 {
+		t.Errorf("events = %v, want ps1 stopped before and after the re-request", h.recs.events)
+	}
+	reRequested, stoppedAfter := false, false
+	for _, e := range h.recs.events {
+		reRequested = reRequested || e == "info:ps2"
+		stoppedAfter = stoppedAfter || (reRequested && e == "del:ps1")
+	}
+	if !stoppedAfter {
+		t.Errorf("events = %v, want ps1 stopped after the re-request (ps2)", h.recs.events)
+	}
 }
 
 func TestCrashRestart(t *testing.T) {
@@ -763,7 +941,7 @@ func TestClientMessageOpensMenu(t *testing.T) {
 func TestIdleStopAfterDelay(t *testing.T) {
 	h := setup(t)
 	playOne(t, h, cfg())
-	h.pl.SetIdleStop(50 * time.Millisecond)
+	h.pl.SetIdleStop(true, 50*time.Millisecond)
 
 	// Playing: the idle timer keeps resetting.
 	h.fm.SetProperty("time-pos", 1.0)
@@ -793,7 +971,7 @@ func TestIdleStopAfterDelay(t *testing.T) {
 func TestIdleStopPausedStopsPlayback(t *testing.T) {
 	h := setup(t)
 	playOne(t, h, cfg())
-	h.pl.SetIdleStop(30 * time.Millisecond)
+	h.pl.SetIdleStop(true, 30*time.Millisecond)
 	h.pl.SetPaused(true)
 	time.Sleep(80 * time.Millisecond)
 	h.pl.Tick()
@@ -1383,7 +1561,7 @@ func TestPrefsMenuRerenders(t *testing.T) {
 	moveTo(h.pl, h.fm, videoPrefsTitle)
 	h.pl.Key("ok")
 	prefs := h.fm.lastText()
-	if !strings.Contains(prefs, "Subtitle Size") || !strings.Contains(prefs, "Transcode HDR") {
+	if !strings.Contains(prefs, "Direct Paths") || !strings.Contains(prefs, "Transcode HDR") {
 		t.Fatalf("video prefs = %q", prefs)
 	}
 	moveTo(h.pl, h.fm, "Transcode HDR")
@@ -1403,8 +1581,16 @@ func TestPrefsMenuRerenders(t *testing.T) {
 	}
 	moveTo(h.pl, h.fm, playerPrefsTitle)
 	h.pl.Key("ok")
-	if p := h.fm.lastText(); !strings.Contains(p, "Auto Play") || !strings.Contains(p, "Enable OSC") {
-		t.Errorf("player prefs = %q", p)
+	index := h.fm.lastText()
+	for _, want := range []string{"Playback", "Subtitles", "Intro & Credits", "System"} {
+		if !strings.Contains(index, want) {
+			t.Errorf("player prefs index missing %q:\n%s", want, index)
+		}
+	}
+	moveTo(h.pl, h.fm, "Playback")
+	h.pl.Key("ok")
+	if rows := strings.Count(h.fm.lastText(), "\n"); rows > 8 {
+		t.Errorf("playback page has %d rows, want <= 7:\n%s", rows, h.fm.lastText())
 	}
 }
 
@@ -1412,11 +1598,9 @@ func TestPrefsMenuRerenders(t *testing.T) {
 func TestSubtitleSizeMenuAppliesToMpv(t *testing.T) {
 	h := setup(t)
 	playOne(t, h, cfg())
-	h.pl.Key("menu")
-	moveTo(h.pl, h.fm, videoPrefsTitle)
-	h.pl.Key("ok") // Video Preferences
-	moveTo(h.pl, h.fm, "Subtitle Size")
-	h.pl.Key("ok") // Subtitle Size
+	gotoPlayerPage(t, h.pl, h.fm, "Subtitles")
+	moveTo(h.pl, h.fm, "Size")
+	h.pl.Key("ok")
 	if got := h.fm.lastText(); !strings.Contains(got, "Select Subtitle Size") {
 		t.Fatalf("subtitle size menu = %q", got)
 	}
@@ -1428,6 +1612,38 @@ func TestSubtitleSizeMenuAppliesToMpv(t *testing.T) {
 	if got := h.fm.prop("sub-scale"); got != "2.00" {
 		t.Errorf("mpv sub-scale = %v, want 2.00", got)
 	}
+}
+
+// gotoPlayerPage walks menu → Player Preferences → the named sub-page.
+func gotoPlayerPage(t *testing.T, pl *Player, fm *fakeMpv, page string) {
+	t.Helper()
+	pl.Key("menu")
+	moveTo(pl, fm, playerPrefsTitle)
+	pl.Key("ok")
+	if page == "" {
+		return // just the index page
+	}
+	moveTo(pl, fm, page)
+	pl.Key("ok")
+}
+
+// openPlayerPage gets to a Player Preferences sub-page from wherever the menu
+// currently is (so tests do not have to count "back" presses).
+func openPlayerPage(t *testing.T, pl *Player, fm *fakeMpv, page string) {
+	t.Helper()
+	// Make sure we are on the Player Preferences index from wherever we are.
+	if !strings.HasPrefix(fm.lastText(), "Main Menu") {
+		pl.Key("menu") // a previous walk closed the menu
+	}
+	if !strings.HasPrefix(fm.lastText(), playerPrefsTitle) {
+		moveTo(pl, fm, playerPrefsTitle)
+		pl.Key("ok")
+	}
+	if page == "" {
+		return // the index page itself
+	}
+	moveTo(pl, fm, page)
+	pl.Key("ok")
 }
 
 // moveTo selects a menu row by label, wrapping like the menu itself.
@@ -1676,19 +1892,24 @@ func TestMenuEscWalksUpTheTree(t *testing.T) {
 
 	h.pl.Key("menu")
 	at("Main Menu")
-	moveTo(h.pl, h.fm, videoPrefsTitle)
+	moveTo(h.pl, h.fm, playerPrefsTitle)
 	h.pl.Key("ok")
-	at(videoPrefsTitle)
-	moveTo(h.pl, h.fm, "Subtitle Size")
+	at(playerPrefsTitle)
+	moveTo(h.pl, h.fm, "Subtitles")
+	h.pl.Key("ok")
+	at("Subtitles")
+	moveTo(h.pl, h.fm, "Size")
 	h.pl.Key("ok")
 	at("Select Subtitle Size")
 	moveTo(h.pl, h.fm, "Huge")
 	h.pl.Key("ok")
-	at(videoPrefsTitle) // the change re-renders this page, it does not move
+	at("Subtitles") // the change re-renders this page, it does not move
 	h.pl.Key("back")
-	at("Main Menu") // one level up: the parent
+	at(playerPrefsTitle) // one level up: the parent
 	h.pl.Key("back")
-	at("<closed>") // and the root closes the menu
+	at("Main Menu") // and up again
+	h.pl.Key("back")
+	at("<closed>") // the root closes the menu
 }
 
 // The mouse script is always loaded (so `menu_mouse` can toggle it at runtime)
@@ -1729,5 +1950,361 @@ func TestMenuMouseToggleUsesClientMessage(t *testing.T) {
 	h.fm.mu.Unlock()
 	if strings.Contains(cmds, "shim-menu-enable") {
 		t.Errorf("mouse script toggled although menu_mouse is off: %q", cmds)
+	}
+}
+
+// replay plays the same item again in the same harness.
+func replay(t *testing.T, h *harness) {
+	t.Helper()
+	m, err := jfin.NewMedia(context.Background(), h.c, cfg(), []string{"a"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+}
+
+// Volume memory: volume *and* mute are restored on the next playback, changes
+// are only recorded (no disk I/O) until Commit — which happens when playback
+// ends, mpv goes away or the app exits.
+func TestRememberVolumeAndMute(t *testing.T) {
+	h := setup(t)
+	// The callback runs on the event-loop goroutine; guard the test's copy.
+	var mu sync.Mutex
+	var remembered, recorded VolumeState
+	commits := 0
+	mem := VolumeMemory{
+		Get:    func() VolumeState { mu.Lock(); defer mu.Unlock(); return remembered },
+		Record: func(v VolumeState) { mu.Lock(); recorded = v; mu.Unlock() },
+		Commit: func() { mu.Lock(); commits++; mu.Unlock() },
+	}
+	h.pl.SetVolumeMemory(mem)
+	seen := func() VolumeState { mu.Lock(); defer mu.Unlock(); return recorded }
+	commitsSeen := func() int { mu.Lock(); defer mu.Unlock(); return commits }
+	setRemembered := func(v VolumeState) { mu.Lock(); remembered = v; mu.Unlock() }
+
+	// Nothing remembered yet: mpv keeps its own values.
+	playOne(t, h, cfg())
+	if h.fm.prop("volume") != nil {
+		t.Errorf("volume set without a remembered value: %v", h.fm.prop("volume"))
+	}
+
+	// A remote change is recorded, not committed.
+	h.fm.SetProperty("volume", 100.0)
+	h.pl.SetVolume(35)
+	if got := seen(); got.Volume != 35 {
+		t.Errorf("recorded volume = %d, want 35", got.Volume)
+	}
+	if commitsSeen() != 0 {
+		t.Error("a volume change wrote to disk (commit called)")
+	}
+	h.pl.SetMute(true)
+	if got := seen(); !got.Mute {
+		t.Error("mute change was not recorded")
+	}
+	if commitsSeen() != 0 {
+		t.Error("a mute change wrote to disk (commit called)")
+	}
+
+	// Stopping playback (the first logical event) commits exactly once.
+	h.pl.Stop()
+	if commitsSeen() != 1 {
+		t.Errorf("commits after stop = %d, want 1", commitsSeen())
+	}
+
+	// The next playback restores both values.
+	setRemembered(VolumeState{Volume: 35, Mute: true})
+	replay(t, h)
+	if got := h.fm.prop("volume"); got != float64(35) {
+		t.Errorf("restored volume = %v, want 35", got)
+	}
+	if got := h.fm.prop("mute"); got != true {
+		t.Errorf("restored mute = %v, want true", got)
+	}
+
+	// A change made inside mpv (OSC / keymap) is recorded too. The first event
+	// per property is mpv's own subscribe echo, so send it.
+	h.fm.changeProp("volume", 35.0)
+	h.fm.changeProp("volume", 70.0)
+	waitFor(t, "mpv-side volume change recorded", func() bool { return seen().Volume == 70 })
+
+	// With the setting off, nothing is restored: mpv keeps whatever it has
+	// (mpv itself carries volume/mute across files, which is what we want to
+	// observe here).
+	h.fm.SetProperty("volume", 88.0)
+	h.fm.SetProperty("mute", false)
+	o := h.pl.Options()
+	o.RememberVolume = false
+	h.pl.SetOptions(o)
+	setRemembered(VolumeState{Volume: 20, Mute: true})
+	replay(t, h)
+	if got := h.fm.prop("volume"); got != 88.0 {
+		t.Errorf("volume changed although remember_volume is off: %v", got)
+	}
+	if got := h.fm.prop("mute"); got == true {
+		t.Error("mute restored although remember_volume is off")
+	}
+}
+
+// The toggle shows up in the player preferences and persists.
+func TestRememberVolumeToggleInMenu(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	var saved int
+	h.pl.SetSaveFunc(func(o Options) { saved++ })
+
+	h.pl.Key("menu")
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, playerPrefsTitle)
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Playback")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Remember Volume")
+	h.pl.Key("ok")
+	if h.pl.Options().RememberVolume {
+		t.Error("Remember Volume toggle did not switch off")
+	}
+	if saved == 0 {
+		t.Error("toggle was not persisted")
+	}
+	if v := h.fm.lastText(); !strings.Contains(v, "Remember Volume") {
+		t.Errorf("prefs menu no longer lists the toggle:\n%s", v)
+	}
+}
+
+// Screenshots must use mpv's `screenshot-to-file` command (the `screenshot`
+// command fails on some 0.41 builds) and tell the user where the file went.
+func TestScreenshotUsesScreenshotToFile(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.ScreenshotDir = "/tmp/shots"
+
+	before := h.fm.numCmds()
+	// The action the `s` key and the OSD menu row both call (the fake mpv does
+	// not run key bindings, so call the action directly).
+	h.pl.Key("screenshot")
+	h.fm.mu.Lock()
+	cmds := strings.Join(h.fm.cmds[before:], "|")
+	shots := append([]string(nil), h.fm.shots...)
+	h.fm.mu.Unlock()
+
+	if len(shots) != 1 || shots[0] != "/tmp/shots" {
+		t.Errorf("screenshot dirs = %v, want [/tmp/shots]", shots)
+	}
+	if !strings.Contains(cmds, "screenshot-to-file") {
+		t.Errorf("screenshot command = %q, want screenshot-to-file", cmds)
+	}
+	if !strings.Contains(h.fm.lastText(), "/tmp/shots") {
+		t.Errorf("no confirmation with the file location: %q", h.fm.lastText())
+	}
+}
+
+// The OSD preferences must cover the settings that are not in the config file
+// only: local bitrate, codec policy, seek steps, idle stop, log level.
+func TestOSDCoversTranscodeAndPlaybackSettings(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetSaveFunc(func(Options) {})
+
+	// Video preferences: both bitrates and the codec toggles.
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, videoPrefsTitle)
+	h.pl.Key("ok")
+	video := h.fm.lastText()
+	for _, want := range []string{"Local Transcode Quality", "Remote Transcode Quality",
+		"Disable Direct Play", "Allow HEVC", "Force H.264"} {
+		if !strings.Contains(video, want) {
+			t.Errorf("video preferences missing %q:\n%s", want, video)
+		}
+	}
+
+	// Local bitrate is changeable and opens on the current value.
+	moveTo(h.pl, h.fm, "Local Transcode Quality")
+	h.pl.Key("ok")
+	if got := h.fm.lastText(); !strings.Contains(got, "Local Transcode Quality") {
+		t.Fatalf("local quality submenu = %q", got)
+	}
+	moveTo(h.pl, h.fm, "720p 3 Mbps")
+	h.pl.Key("ok")
+	if got := h.pl.Options().LocalKbps; got != 3000 {
+		t.Errorf("LocalKbps = %d, want 3000", got)
+	}
+
+	// Player preferences is an index; the rows live on its sub-pages.
+	openPlayerPage(t, h.pl, h.fm, "") // the index itself: no row selected
+	index := h.fm.lastText()
+	for _, want := range []string{"Playback", "Subtitles", "Intro & Credits", "System"} {
+		if !strings.Contains(index, want) {
+			t.Errorf("player preferences index missing %q:\n%s", want, index)
+		}
+	}
+
+	// Seek steps: horizontal then vertical, under Playback.
+	openPlayerPage(t, h.pl, h.fm, "Playback")
+	playback := h.fm.lastText()
+	for _, want := range []string{"Seek Steps", "Stop When Idle", "Remember Volume"} {
+		if !strings.Contains(playback, want) {
+			t.Errorf("playback page missing %q:\n%s", want, playback)
+		}
+	}
+	moveTo(h.pl, h.fm, "Seek Steps")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "← / →")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "15 s")
+	h.pl.Key("ok")
+	o := h.pl.Options()
+	if o.SeekLeft != -15 || o.SeekRight != 15 {
+		t.Errorf("horizontal seek steps = %v/%v, want -15/15", o.SeekLeft, o.SeekRight)
+	}
+	// The label reflects it.
+	if v := h.fm.lastText(); !strings.Contains(v, "Seek Steps: 15 s / 60 s") {
+		t.Errorf("playback page row not updated:\n%s", v)
+	}
+}
+
+// Stop-when-idle and the log level are live-editable.
+func TestOSDIdleStopAndLogLevel(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetSaveFunc(func(Options) {})
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, playerPrefsTitle)
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Playback")
+	h.pl.Key("ok")
+
+	moveTo(h.pl, h.fm, "Stop When Idle")
+	h.pl.Key("ok") // the submenu lists off / 15m / 1h / 3h / 6h / 24h
+	moveTo(h.pl, h.fm, "6 hours")
+	h.pl.Key("ok")
+	o := h.pl.Options()
+	if !o.IdleStop || o.IdleStopAfter != 6*time.Hour {
+		t.Errorf("idle stop = %v after %v, want true/6h", o.IdleStop, o.IdleStopAfter)
+	}
+
+	// The log level lives on the System page.
+	openPlayerPage(t, h.pl, h.fm, "System")
+	moveTo(h.pl, h.fm, "Log Level")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "debug")
+	h.pl.Key("ok")
+	if got := h.pl.Options().LogLevel; got != "debug" {
+		t.Errorf("log level = %q, want debug", got)
+	}
+	// "off" in the idle submenu turns it off again.
+	openPlayerPage(t, h.pl, h.fm, "Playback")
+	moveTo(h.pl, h.fm, "Stop When Idle")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "off")
+	h.pl.Key("ok")
+	if h.pl.Options().IdleStop {
+		t.Error("Stop When Idle could not be switched off")
+	}
+}
+
+// After changing a setting the cursor must stay on that row, not jump to the
+// top of the page.
+func TestPreferenceKeepsCursorOnChangedRow(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+	h.pl.SetSaveFunc(func(Options) {})
+
+	// A toggle on the second row of the Playback page.
+	openPlayerPage(t, h.pl, h.fm, "Playback")
+	moveTo(h.pl, h.fm, "Media Key Seek")
+	h.pl.Key("ok")
+	view := h.fm.lastText()
+	if !strings.Contains(view, "**") {
+		t.Fatalf("nothing highlighted after the change:\n%s", view)
+	}
+	if !strings.Contains(view, "**✔ Media Key Seek**") {
+		t.Errorf("cursor moved off the changed row:\n%s", view)
+	}
+	// And the cursor is where we were: Media Key Seek, not row 0.
+	idx := menuRowOf(h.fm.lastText(), "Media Key Seek")
+	sel := menuRowOf(h.fm.lastText(), "**")
+	if idx != sel {
+		t.Errorf("selected row = %d, want the Media Key Seek row (%d):\n%s", sel, idx, h.fm.lastText())
+	}
+
+	// Same for a row whose label changes (Stop When Idle).
+	moveTo(h.pl, h.fm, "Stop When Idle")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "15 minutes")
+	h.pl.Key("ok")
+	view = h.fm.lastText()
+	if !strings.Contains(view, "**Stop When Idle: 15m**") {
+		t.Errorf("cursor not kept on the row whose label changed:\n%s", view)
+	}
+}
+
+// menuRowOf returns the 0-based row index of a label in a rendered menu (-1 if
+// it is the highlighted one, use "**" for the cursor).
+func menuRowOf(text, label string) int {
+	rows := 0
+	for i, line := range strings.Split(text, "\n") {
+		if i == 0 {
+			continue
+		}
+		if strings.Contains(line, label) {
+			return rows
+		}
+		rows++
+	}
+	return -1
+}
+
+// Changing a transcode-profile setting while playing re-requests the stream
+// and resumes at the same position (instead of waiting for the next item).
+func TestProfileChangeRestartsStream(t *testing.T) {
+	h := setup(t)
+	playOne(t, h, cfg())
+
+	var restarts int
+	done := make(chan struct{}, 4)
+	h.pl.SetProfileChangeHook(func() { restarts++; done <- struct{}{} })
+
+	// A profile setting: the local bitrate, in Video Preferences.
+	h.pl.Key("menu")
+	moveTo(h.pl, h.fm, videoPrefsTitle)
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Local Transcode Quality")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "540p 1.5 Mbps")
+	h.pl.Key("ok")
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no profile-change hook after changing the local bitrate")
+	}
+	if h.pl.Options().LocalKbps != 1500 {
+		t.Errorf("LocalKbps = %d, want 1500", h.pl.Options().LocalKbps)
+	}
+
+	// Restart reloads the item and keeps the position.
+	h.fm.SetProperty("time-pos", 42.0)
+	before := h.fm.numLoads()
+	if !h.pl.Restart() {
+		t.Fatal("Restart reported nothing to restart")
+	}
+	if got := h.fm.numLoads(); got != before+1 {
+		t.Errorf("restart did not reload: %d → %d loads", before, got)
+	}
+	if pos := h.fm.prop("time-pos"); pos == nil || pos.(float64) < 41 {
+		t.Errorf("resume position = %v, want ~42", pos)
+	}
+
+	// A setting that does not touch the profile must not fire the hook.
+	restarts = 0
+	openPlayerPage(t, h.pl, h.fm, "Subtitles")
+	moveTo(h.pl, h.fm, "Size")
+	h.pl.Key("ok")
+	moveTo(h.pl, h.fm, "Huge")
+	h.pl.Key("ok")
+	time.Sleep(150 * time.Millisecond)
+	if restarts != 0 {
+		t.Errorf("a subtitle change triggered %d restarts, want 0", restarts)
 	}
 }

@@ -29,6 +29,12 @@ type Session struct {
 	UpdateNote func() string
 	// OpenUpdatePage opens that release in the browser.
 	OpenUpdatePage func()
+	// OpenConsole opens a terminal with the live status window (tray-only mode).
+	OpenConsole func()
+	// OpenSetup opens the account wizard in a terminal of its own. Set only in
+	// tray-only mode, where there is no TUI to embed the wizard in; closing the
+	// window leaves this process (and the session) running.
+	OpenSetup func()
 	// Quit stops the whole app: the session, mpv and the TUI.
 	Quit func()
 	// Disconnect drops the connection but keeps playback and the UI up;

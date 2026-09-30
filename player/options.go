@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"mpv-shim/jfin"
 )
 
 // Options mirrors the subset of upstream's settings the player cares about.
@@ -31,6 +33,24 @@ type Options struct {
 	SubColor    string
 	SubPosition string // bottom | top | middle
 
+	// Transcode quality and codec policy (per play, read from settings).
+	RemoteKbps int
+	LocalKbps  int
+	// AlwaysTranscode = "disable direct play" (upstream always_transcode).
+	AlwaysTranscode bool
+	TranscodeH265   bool // allow h265/hevc as a transcode target
+	ForceH264       bool // …or force h264
+	ForceVideoCodec string
+	ForceAudioCodec string
+
+	// Idle behaviour: stop after IdleStopAfter of idleness.
+	IdleStop      bool
+	IdleStopAfter time.Duration
+
+	// Logging: mpv's msg-level, and whether to redact tokens from our log.
+	LogLevel       string
+	SanitizeOutput bool
+
 	// Behaviour toggles. The OSD preference menus (prefs.go) write these live
 	// and call Save, so they must stay in sync with config.json.
 	AutoPlay             bool
@@ -42,6 +62,7 @@ type Options struct {
 	SkipCredits          bool
 	SkipCreditsAlways    bool
 	MenuMouse            bool
+	RememberVolume       bool
 	WriteLogs            bool
 	CheckUpdates         bool
 	TranscodeHi10p       bool
@@ -49,7 +70,6 @@ type Options struct {
 	TranscodeDolbyVision bool
 	DirectPaths          bool
 	RemoteDirectPaths    bool
-	RemoteKbps           int // transcode quality preset
 	PlaybackTimeout      time.Duration
 	IdleCmdDelay         time.Duration
 	ShellCmds            ShellCmds
@@ -71,9 +91,15 @@ func DefaultOptions() Options {
 		SeekLeft:        -5,
 		SeekRight:       5,
 		RemoteKbps:      25000,
+		LocalKbps:       10000,
+		IdleStop:        true,
+		IdleStopAfter:   time.Hour,
+		LogLevel:        "info",
+		SanitizeOutput:  true,
 		SkipIntro:       true,
 		SkipCredits:     true,
 		MenuMouse:       true,
+		RememberVolume:  true,
 		SubSize:         100,
 		SubColor:        "#FFFFFFFF",
 		SubPosition:     "bottom",
@@ -149,6 +175,38 @@ func (p *Player) Options() Options {
 	defer p.mu.Unlock()
 	return p.opt
 }
+
+// profileKey identifies the settings that decide what we ask the server for:
+// the transcode bitrates, the codec policy and the direct-play switch. When it
+// changes during playback the stream has to be re-requested.
+func (o Options) profileKey() string {
+	return fmt.Sprintf("%d/%d/%t/%t/%t/%t/%t/%t/%t",
+		o.LocalKbps, o.RemoteKbps, o.AlwaysTranscode, o.TranscodeH265,
+		o.ForceH264, o.TranscodeHi10p, o.TranscodeHDR, o.TranscodeDolbyVision,
+		o.DirectPaths)
+}
+
+// profileKey is the current profile identity of the options.
+func (p *Player) profileKey() string { return p.opt.profileKey() }
+
+// noteProfileChange remembers the profile key and returns a function to call
+// (with p.mu released) when it changed. The preference handlers run with the
+// lock held, so the hook is invoked by the caller afterwards.
+func (p *Player) noteProfileChange(before string) func() {
+	if p.profileKey() == before || p.onProfileChange == nil {
+		return func() {}
+	}
+	return func() { go p.onProfileChange() }
+}
+
+// SetProfileChangeHook installs the callback for "the transcode profile
+// changed" (main re-requests the stream).
+func (p *Player) SetProfileChangeHook(f func()) { p.onProfileChange = f }
+
+// SetLiveConfig installs the callback that hands out the current media config
+// (the preference menus change the settings behind our back). Every load
+// re-reads it, so a restart asks the server for the profile that is set now.
+func (p *Player) SetLiveConfig(f func() jfin.MediaConfig) { p.liveCfg = f }
 
 // SetSaveFunc installs the callback the preference menus use to persist a
 // settings change. It receives the new options, because it is called with

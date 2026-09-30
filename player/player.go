@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mpv-shim/jfin"
@@ -24,7 +25,13 @@ type Player struct {
 	ctx   context.Context
 	media *jfin.Media
 	url   string
-	start time.Time
+	// entryID is the playlist entry mpv gave the current load. Every load
+	// replaces the entry, so the end-file of the previous one is stale.
+	// Atomic: the IPC reader goroutine reads it and must never block on
+	// p.mu — it is the goroutine that delivers mpv's command replies, so a
+	// blocked reader deadlocks every player holding p.mu.
+	entryID atomic.Int64
+	start   time.Time
 	// Timeline state (upstream names).
 	shouldSendTimeline bool
 	watchedMarked      bool
@@ -35,10 +42,12 @@ type Player struct {
 	lastSeek           float64
 	doNotHandlePause   bool
 	pauseIgnore        bool
-	fileErr            bool
-	stopping           bool
-	events             chan mpvEvent
-	menu               *menu
+	// loadFailed: mpv could not load a file. Atomic for the same reason as
+	// entryID (the reader goroutine writes it).
+	loadFailed atomic.Bool
+	stopping   bool
+	events     chan mpvEvent
+	menu       *menu
 	// last reported pause/mute/volume, to spot remote/UI-visible changes
 	repPause    bool
 	repMute     bool
@@ -50,7 +59,6 @@ type Player struct {
 	lastReport  time.Time       // last progress report we sent (report throttling)
 	// idle-stop: when > 0, playback is stopped after this long without
 	// activity (upstream stop_idle + idle_cmd_delay).
-	idleStop     time.Duration
 	lastActivity time.Time
 	// ScreenshotDir is where TakeScreenshot writes frames.
 	ScreenshotDir string
@@ -58,6 +66,13 @@ type Player struct {
 	// preference menus.
 	opt  Options
 	save func(Options)
+	// onProfileChange is called (without the lock) when a preference changed
+	// what we ask the server for.
+	onProfileChange func()
+	// liveCfg returns the media config to re-request with. A Media captures
+	// the config it was built with, so without this a profile change would
+	// re-request the very stream the user just turned off.
+	liveCfg func() jfin.MediaConfig
 
 	// update check (upstream update_check.py)
 	updateURL     string
@@ -78,7 +93,6 @@ type mpvEvent struct {
 	prop   string          // property-change: property name
 	data   json.RawMessage // property-change: new value
 	reason string          // end-file: "eof" | "stop" | "quit" | "error" | ...
-
 }
 
 func New(mpv Mpv, lg *log.Logger) *Player {
@@ -153,12 +167,12 @@ func (p *Player) Status() Status {
 	return s
 }
 
-// SetIdleStop enables the idle stop: after d without playback (or without
-// any activity) the player stops, as upstream's stop_idle does. 0 disables.
-func (p *Player) SetIdleStop(d time.Duration) {
+// SetIdleStop is the startup shortcut for the idle_stop/idle_delay_s settings;
+// at runtime the preference menus change Options.IdleStop/IdleStopAfter.
+func (p *Player) SetIdleStop(enabled bool, after time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.idleStop = d
+	p.opt.IdleStop, p.opt.IdleStopAfter = enabled, after
 	p.lastActivity = time.Now()
 }
 
@@ -167,18 +181,19 @@ func (p *Player) touchLocked() { p.lastActivity = time.Now() }
 
 // idleCheckLocked implements the idle stop. Called from Tick.
 func (p *Player) idleCheckLocked() {
-	if p.idleStop <= 0 || p.stopping || p.media == nil {
+	if !p.opt.IdleStop || p.opt.IdleStopAfter <= 0 || p.stopping || p.media == nil {
 		return // nothing loaded: there is no playback to stop
 	}
+	stopAfter := p.opt.IdleStopAfter
 	// A paused player counts as idle; the stop below handles it.
 	if !p.aborted() && !p.lastPause {
 		p.touchLocked() // playing: not idle
 		return
 	}
-	if time.Since(p.lastActivity) < p.idleStop {
+	if time.Since(p.lastActivity) < stopAfter {
 		return
 	}
-	p.log.Printf("idle for %s — stopping playback", p.idleStop)
+	p.log.Printf("idle for %s — stopping playback", stopAfter)
 	p.touchLocked()
 	p.stopLocked()
 	if p.opt.ShellCmds.Idle != "" {
@@ -280,9 +295,22 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	if v == nil {
 		return errors.New("player: media has no video")
 	}
+	// The item carries the config it was first built with; the settings may
+	// have changed since (a transcode profile change is exactly this), and a
+	// re-request has to use the current one or it gets the same stream back.
+	if p.liveCfg != nil {
+		m.Cfg = p.liveCfg()
+	}
 	p.shouldSendTimeline = false
 	p.start = time.Now()
 	p.runShell("pre_media_cmd", p.opt.ShellCmds.PreMedia)
+	// The encoding behind the stream we are replacing. PlaybackURL stops it
+	// before the re-request, but that is too early here: mpv keeps polling
+	// the old URL until we load the new one, and the server answers those
+	// requests by starting ffmpeg *again* for the job we just stopped — two
+	// encodings, one of them invisible and never cleaned up. So remember the
+	// session and stop it again once mpv has moved on.
+	oldSession := v.TranscodeSession()
 	url, err := v.PlaybackURL(p.ctx)
 	if err != nil {
 		return fmt.Errorf("playback url: %w", err)
@@ -302,9 +330,14 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	}
 	p.url = url
 	p.mpv.SetProperty("keep-open", m.HasNext())
-	if err := p.mpv.LoadFile(p.ctx, url); err != nil {
+	id, err := p.mpv.LoadFile(p.ctx, url)
+	if err != nil {
 		p.doNotHandlePause = false
 		return err
+	}
+	p.entryID.Store(id)
+	if oldSession != "" {
+		_ = v.M.C.CloseTranscode(p.ctx, oldSession)
 	}
 	if !p.waitForDuration(p.timeoutLocked()) {
 		p.doNotHandlePause = false
@@ -318,6 +351,7 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	p.lastMute = false
 	p.watchedMarked = false
 	p.configureStreams()
+	p.restoreVolumeLocked()
 	p.applySubtitleStyleLocked()
 	if p.opt.Fullscreen {
 		p.mpv.SetProperty("fullscreen", true)
@@ -370,6 +404,7 @@ func (p *Player) stopLocked() {
 		p.log.Printf("session stopped: %v", err)
 	}
 	p.runShell("stop_cmd", p.opt.ShellCmds.Stop)
+	commitVolume() // playback ended: a good moment to persist the volume state
 }
 
 // InsertQueue adds ids to the queue (PlayNext after current, PlayLast at the
@@ -396,6 +431,27 @@ func (p *Player) SetStreams(aid, sid *int) {
 	} else {
 		p.configureStreams()
 	}
+}
+
+// Restart re-runs playback for the current item, resuming where it is. It is
+// what a change to the transcode profile (bitrate, codec policy, direct play)
+// triggers: the old stream no longer matches what we would ask for, so the item
+// is re-requested with the new profile and continues from the same position.
+func (p *Player) Restart() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.media == nil {
+		return false
+	}
+	pos := p.lastPos
+	if x, err := p.mpv.GetProperty("time-pos"); err == nil {
+		if f, ok := x.(float64); ok {
+			pos = f
+		}
+	}
+	p.log.Printf("re-requesting the stream, resuming at %.1fs", pos)
+	p.restartLocked()
+	return true
 }
 
 func (p *Player) restartLocked() {
@@ -481,10 +537,18 @@ func (p *Player) handleEvent(name string, data json.RawMessage) {
 		// finished is what made closing the window auto-advance the queue in a
 		// loop, spawning a new mpv for every following episode.
 		var e struct {
-			Reason    string `json:"reason"`
-			FileError string `json:"file_error"`
+			Reason          string `json:"reason"`
+			FileError       string `json:"file_error"`
+			PlaylistEntryID int64  `json:"playlist_entry_id"`
 		}
 		_ = json.Unmarshal(data, &e)
+		// `loadfile replace` ends the previous file, and that end-file
+		// arrives around the new load: acting on it would stop the stream we
+		// just requested (the transcode re-request, a track/profile change).
+		if cur := p.entryID.Load(); cur != 0 && e.PlaylistEntryID != 0 && e.PlaylistEntryID != cur {
+			p.log.Printf("ignoring end-file of replaced entry %d (playing %d)", e.PlaylistEntryID, cur)
+			return
+		}
 		reason := e.Reason
 		if e.Reason == "error" || e.FileError != "" {
 			failed = true
@@ -501,9 +565,7 @@ func (p *Player) handleEvent(name string, data json.RawMessage) {
 		return
 	}
 	if failed {
-		p.mu.Lock()
-		p.fileErr = true
-		p.mu.Unlock()
+		p.loadFailed.Store(true)
 	}
 	if failed {
 		name = "file-error"
@@ -533,7 +595,7 @@ func (p *Player) eventLoop() {
 		}
 		if ev.name == "file-error" {
 			p.mu.Lock()
-			p.fileErr = false
+			p.loadFailed.Store(false)
 			p.log.Printf("mpv failed to load media")
 			p.stopLocked()
 			p.mu.Unlock()
@@ -628,6 +690,7 @@ func (p *Player) handleExit() {
 		if err := v.M.C.SessionStopped(p.ctx, opts); err != nil {
 			p.log.Printf("session stopped (graceful): %v", err)
 		}
+		commitVolume() // mpv is going away
 		return
 	}
 	// Crash: kill -9 / OOM / segfault. Respawn and resume at the last
@@ -664,7 +727,7 @@ func (p *Player) handleExit() {
 	}
 
 	p.doNotHandlePause = true
-	p.fileErr = false
+	p.loadFailed.Store(false)
 	if err := p.mpv.EnsureRunning(p.ctx); err != nil {
 		p.log.Printf("mpv restart failed: %v", err)
 		p.media = nil
@@ -673,11 +736,13 @@ func (p *Player) handleExit() {
 		return
 	}
 	p.mpv.SetProperty("keep-open", m.HasNext())
-	if err := p.mpv.LoadFile(p.ctx, url); err != nil {
+	id, err := p.mpv.LoadFile(p.ctx, url)
+	if err != nil {
 		p.log.Printf("mpv restart load: %v", err)
 		p.doNotHandlePause = false
 		return
 	}
+	p.entryID.Store(id)
 	p.waitForDuration(30 * time.Second)
 	p.mpv.SetProperty("force-media-title", v.ProperTitle())
 	p.configureStreams()
@@ -874,7 +939,7 @@ func abs(f float64) float64 {
 func (p *Player) waitForDuration(d time.Duration) bool {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		if p.fileErr {
+		if p.loadFailed.Load() {
 			return false
 		}
 		if x, err := p.mpv.GetProperty("duration"); err == nil && x != nil {

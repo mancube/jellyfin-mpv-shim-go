@@ -9,7 +9,7 @@ type ProfileOpts struct {
 	VideoBitrate   *int // kbps; nil → LocalKbps/RemoteKbps
 	LocalKbps      int
 	RemoteKbps     int
-	ForceTranscode bool
+	ForceTranscode bool // upstream always_transcode: no DirectPlay
 	TranscodeH265  bool // allow h265/hevc as transcode targets
 	ForceH264      bool // force h264 output
 
@@ -24,7 +24,6 @@ type ProfileOpts struct {
 	Transcode4K          bool
 	ForceVideoCodec      string
 	ForceAudioCodec      string
-	AlwaysTranscode      bool // upstream always_transcode: no DirectPlay
 }
 
 // CodecProfile is a device-profile CodecProfiles entry.

@@ -52,6 +52,7 @@ func run() int {
 		fmt.Fprintln(fs.Output(), "Usage:")
 		fmt.Fprintln(fs.Output(), "  mpv-shim                                       play: session loop + TUI + tray")
 		fmt.Fprintln(fs.Output(), "  mpv-shim setup                                 TUI: add/remove accounts (password or Quick Connect)")
+		fmt.Fprintln(fs.Output(), "  mpv-shim --console                             status window for a running instance (tray mode)")
 		fmt.Fprintln(fs.Output(), "  mpv-shim login <server> <username> <password>   log in and store credentials")
 		fmt.Fprintln(fs.Output(), "  mpv-shim accounts [rm <index>]                  list/remove saved accounts")
 		fmt.Fprintln(fs.Output(), "\nFlags:")
@@ -63,6 +64,7 @@ func run() int {
 	password := fs.String("password", "", "password")
 	debug := fs.Bool("debug", false, "verbose logging")
 	headless := fs.Bool("headless", false, "no TUI: log to stdout only (daemon mode)")
+	consoleOnly := fs.Bool("console", false, "show the status window of a running instance and exit with it")
 	loginOnly := fs.Bool("login-only", false, "log in and exit")
 	statusOnly := fs.Bool("status", false, "print connection status and exit")
 	showVersion := fs.Bool("version", false, "print version and exit")
@@ -107,6 +109,11 @@ func run() int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	if *consoleOnly {
+		// Connects to the running instance's console socket.
+		return intErr(ui.RunConsoleClient(context.Background(), consoleSocket(cfgDir)))
+	}
 
 	switch sub {
 	case "login":
@@ -233,6 +240,8 @@ type session struct {
 
 	mu     sync.Mutex // guards cancel (start/disconnect)
 	cancel context.CancelFunc
+
+	commitVolume func() // persist a pending volume change at shutdown
 }
 
 // newSession wires the client, mpv, player and WS event handlers.
@@ -278,6 +287,73 @@ func mediaConfigLocked(s *Settings) jfin.MediaConfig {
 	}
 }
 
+// consoleSocket is where a "Show Console" window connects.
+func consoleSocket(cfgDir string) string { return filepath.Join(cfgDir, "console.sock") }
+
+// consoleSnapshot renders the state the console window shows.
+func consoleSnapshot(sess *session, note string) ui.ConsoleSnapshot {
+	st := sess.pl.Status()
+	snap := ui.ConsoleSnapshot{
+		Server: sess.account.Server, Device: sess.account.Username,
+		Title: st.Title, Playing: st.Playing, Paused: st.Paused,
+		Position: st.Position, Duration: st.Duration,
+		Volume: st.Volume, Muted: st.Mute, Lines: sess.logs.Tail(8), Note: note,
+	}
+	switch sess.ws.State() {
+	case jfin.StateConnected:
+		snap.State = "online"
+	case jfin.StateReconnecting:
+		snap.State = "reconnecting"
+	default:
+		snap.State = "offline"
+	}
+	return snap
+}
+
+// volumeMemory installs the app side of "remember volume and mute": reading the
+// state to restore, recording changes in memory, and persisting them only when
+// the player asks (end of playback, mpv going away, app exit).
+func volumeMemory(s *Settings, cfgPath string, lg *log.Logger) player.VolumeMemory {
+	var (
+		mu    sync.Mutex
+		state player.VolumeState
+	)
+	return player.VolumeMemory{
+		Get: func() player.VolumeState {
+			settingsMu.Lock()
+			defer settingsMu.Unlock()
+			if !s.RememberVolume {
+				return player.VolumeState{}
+			}
+			return player.VolumeState{Volume: s.LastVolume, Mute: s.LastMuted}
+		},
+		Record: func(v player.VolumeState) {
+			mu.Lock()
+			state = v
+			mu.Unlock()
+		},
+		Commit: func() {
+			mu.Lock()
+			v, ok := state, state.Volume > 0
+			mu.Unlock()
+			if !ok {
+				return // nothing worth writing yet
+			}
+			settingsMu.Lock()
+			if s.LastVolume == v.Volume && s.LastMuted == v.Mute {
+				settingsMu.Unlock()
+				return // nothing changed since the last write
+			}
+			s.LastVolume, s.LastMuted = v.Volume, v.Mute
+			err := s.Save(cfgPath)
+			settingsMu.Unlock()
+			if err != nil {
+				lg.Printf("saving volume: %v", err)
+			}
+		},
+	}
+}
+
 // applyAndSave persists a preference-menu change atomically.
 func applyAndSave(s *Settings, o player.Options, cfgPath string) error {
 	settingsMu.Lock()
@@ -306,10 +382,17 @@ func playerOptionsLocked(s *Settings) player.Options {
 	o.PlaybackTimeout = time.Duration(s.PlaybackTimeoutS) * time.Second
 	o.IdleCmdDelay = time.Duration(s.IdleCmdDelayS) * time.Second
 	o.LogDecisions = s.LogDecisions
-	o.RemoteKbps = s.RemoteKbps
+	o.RemoteKbps, o.LocalKbps = s.RemoteKbps, s.LocalKbps
+	o.AlwaysTranscode, o.TranscodeH265, o.ForceH264 = s.AlwaysTranscode, s.TranscodeH265, s.ForceH264
+	o.ForceVideoCodec, o.ForceAudioCodec = s.ForceVideoCodec, s.ForceAudioCodec
+	o.IdleStop = s.IdleStop
+	o.IdleStopAfter = time.Duration(s.IdleDelayS) * time.Second
+	o.LogLevel = mpvLogLevel(s)
+	o.SanitizeOutput = s.SanitizeOutput
 	o.SkipIntro, o.SkipCredits = s.SkipIntro, s.SkipCredits
 	o.SkipIntroAlways, o.SkipCreditsAlways = s.SkipIntroAlways, s.SkipCreditsAlways
 	o.MenuMouse, o.WriteLogs, o.CheckUpdates = s.MenuMouse, s.WriteLog, s.CheckUpdates
+	o.RememberVolume = s.RememberVolume
 	o.TranscodeHi10p, o.TranscodeHDR, o.TranscodeDolbyVision = s.TranscodeHi10p, s.TranscodeHDR, s.TranscodeDolbyVision
 	o.DirectPaths, o.RemoteDirectPaths = s.DirectPaths, s.RemoteDirectPaths
 	o.ShellCmds = player.ShellCmds{
@@ -333,10 +416,19 @@ func applyOptionsToSettings(s *Settings, o player.Options) {
 	s.SkipIntro, s.SkipIntroAlways = o.SkipIntro, o.SkipIntroAlways
 	s.SkipCredits, s.SkipCreditsAlways = o.SkipCredits, o.SkipCreditsAlways
 	s.MenuMouse, s.WriteLog, s.CheckUpdates = o.MenuMouse, o.WriteLogs, o.CheckUpdates
+	s.RememberVolume = o.RememberVolume
 	s.TranscodeHi10p, s.TranscodeHDR = o.TranscodeHi10p, o.TranscodeHDR
 	s.TranscodeDolbyVision = o.TranscodeDolbyVision
 	s.DirectPaths, s.RemoteDirectPaths = o.DirectPaths, o.RemoteDirectPaths
-	s.RemoteKbps = o.RemoteKbps
+	s.RemoteKbps, s.LocalKbps = o.RemoteKbps, o.LocalKbps
+	s.AlwaysTranscode, s.TranscodeH265, s.ForceH264 = o.AlwaysTranscode, o.TranscodeH265, o.ForceH264
+	s.ForceVideoCodec, s.ForceAudioCodec = o.ForceVideoCodec, o.ForceAudioCodec
+	s.IdleStop = o.IdleStop
+	if o.IdleStopAfter > 0 {
+		s.IdleDelayS = int(o.IdleStopAfter.Seconds())
+	}
+	s.LogLevel = o.LogLevel
+	s.SanitizeOutput = o.SanitizeOutput
 	if len(o.Keys) > 0 {
 		s.KeyBindings = o.Keys
 	}
@@ -363,6 +455,16 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	})
 	pl := player.New(proc, lg)
 	pl.SetOptions(playerOptions(s))
+	// A change that alters what we ask the server for (bitrate, codec policy,
+	// direct play) re-requests the stream and resumes where we were, instead of
+	// waiting for the next item.
+	pl.SetProfileChangeHook(func() {
+		if pl.Restart() {
+			lg.Printf("transcode profile changed — stream re-requested, resuming playback")
+		}
+	})
+	volMem := volumeMemory(s, cfgPath, lg)
+	pl.SetVolumeMemory(volMem)
 	pl.SetVersion(version)
 	// Our own release feed, never upstream's: this is the Go rewrite and must
 	// not report the Python shim's versions. Override with `update_url`.
@@ -382,9 +484,7 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 			lg.Printf("saving config: %v", err)
 		}
 	})
-	if s.IdleStop {
-		pl.SetIdleStop(time.Duration(s.IdleDelayS) * time.Second)
-	}
+	pl.SetIdleStop(s.IdleStop, time.Duration(s.IdleDelayS)*time.Second)
 	pl.PauseReport = s.PauseReport
 	pl.ScreenshotDir = s.ScreenshotDir
 	if pl.ScreenshotDir == "" {
@@ -400,6 +500,11 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	// quality / codec knobs / language rules while we run.
 	// Built per play (see below): a closure so preference changes apply now.
 	liveMediaConfig := func() jfin.MediaConfig { return mediaConfig(s) }
+	// A re-request must ask for the profile that is set *now*: the preference
+	// menus write the new settings into s, and the item would otherwise keep
+	// the config it was first built with — so a profile change would ask for
+	// the very stream the user just turned off.
+	pl.SetLiveConfig(liveMediaConfig)
 	ws.On("Play", func(ctx context.Context, data json.RawMessage) {
 		go handlePlay(ctx, client, pl, liveMediaConfig(), data) // don't block the WS read loop
 	})
@@ -455,7 +560,10 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 		go handlePlaystate(pl, data)
 	})
 
-	return &session{account: a, client: client, proc: proc, pl: pl, ws: ws, logs: logs, ipcDir: ipcDir, lg: lg}, nil
+	return &session{
+		account: a, client: client, proc: proc, pl: pl, ws: ws, logs: logs,
+		ipcDir: ipcDir, lg: lg, commitVolume: volMem.Commit,
+	}, nil
 }
 
 // start launches the /socket loop in the background. It can be stopped with
@@ -498,6 +606,9 @@ func (sess *session) connected() bool { return sess.ws.Connected() }
 // shutdown is the app-exit path: stop the socket loop, tear playback down and
 // kill mpv (upstream mpv_shim.py shutdown order).
 func (sess *session) shutdown(ctx context.Context) {
+	if sess.commitVolume != nil {
+		sess.commitVolume() // app exit: persist a pending change
+	}
 	sess.disconnect()
 	sess.pl.Shutdown()
 	_ = os.RemoveAll(sess.ipcDir)
@@ -506,6 +617,10 @@ func (sess *session) shutdown(ctx context.Context) {
 
 // runSession is the whole app for one account: the session loop plus, when
 // there is a terminal, the TUI status screen and the desktop tray.
+// runSession is the whole app for one account: the session loop, the console
+// bridge and — when there is a terminal — the TUI status screen and the tray.
+// Without a terminal it runs tray-only: the tray icon is the interface and
+// "Show Console" opens a status window on demand.
 func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfgDir, cfgPath string, interactive bool) int {
 	ring := ui.NewLogRing(200)
 	var out io.Writer = io.MultiWriter(ring, os.Stderr)
@@ -533,12 +648,31 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 	sess.start(sigCtx)
 	defer sess.shutdown(sigCtx)
 
-	if !interactive {
-		<-sigCtx.Done() // headless: logs only (daemon mode)
-		return 0
+	// The console bridge always runs: it is what the tray's "Show Console"
+	// opens, and in tray-only mode it is the whole interface.
+	sock := consoleSocket(cfgDir)
+	if cs, err := ui.NewConsoleServer(sock); err != nil {
+		lg.Printf("console: %v", err)
+	} else {
+		defer cs.Close()
+		go func() {
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-sigCtx.Done():
+					return
+				case <-t.C:
+					note := ""
+					if sess.pl.HasUpdate() {
+						note = "mpv-shim " + sess.pl.UpdateVersion() + " is available"
+					}
+					cs.Broadcast(consoleSnapshot(sess, note))
+				}
+			}
+		}()
 	}
 
-	quitOnce := sync.Once{}
 	uiSess := ui.NewSession(a, sess.ws, sess.pl, ring)
 	uiSess.ConfigDir = cfgDir
 	if s.WriteLog {
@@ -558,7 +692,17 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 		return ""
 	}
 	uiSess.OpenUpdatePage = sess.pl.OpenUpdatePage
+	selfPath, err := os.Executable()
+	if err != nil {
+		lg.Printf("tray windows: %v", err)
+	}
+	uiSess.OpenConsole = func() {
+		if err := ui.ShowWindow(selfPath, sock, "--console"); err != nil {
+			lg.Printf("console: %v", err)
+		}
+	}
 	// Quit = the whole app (session + mpv + TUI); Disconnect = session only.
+	quitOnce := sync.Once{}
 	uiSess.Quit = func() {
 		quitOnce.Do(func() {
 			stop()
@@ -573,6 +717,23 @@ func runSession(s *Settings, a jfin.Account, creds *jfin.CredFile, credPath, cfg
 	uiSess.Disconnect = sess.disconnect
 	uiSess.Reconnect = func() { sess.start(sigCtx) }
 	uiSess.SetLogf(lg.Printf)
+
+	if !interactive {
+		// Tray-only: no TUI, so the console window is the on-demand surface —
+		// and so is the account wizard. It runs as its own process editing the
+		// saved accounts; closing it leaves this one (and playback) running.
+		uiSess.OpenSetup = func() {
+			if err := ui.ShowWindow(selfPath, "", "setup"); err != nil {
+				lg.Printf("setup: %v", err)
+			}
+		}
+		if ok := ui.RunTray(uiSess); !ok {
+			lg.Printf("tray: no system tray host found; running with logs only")
+		}
+		<-sigCtx.Done()
+		return 0
+	}
+
 	deps := ui.Deps{
 		Creds:    creds,
 		CredPath: credPath,

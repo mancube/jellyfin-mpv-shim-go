@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -30,11 +32,11 @@ type minimalMvp struct {
 func newMinimalMvp() *minimalMvp { return &minimalMvp{props: map[string]any{"duration": 100.0}} }
 
 func (m *minimalMvp) EnsureRunning(ctx context.Context) error { return nil }
-func (m *minimalMvp) LoadFile(ctx context.Context, u string) error {
+func (m *minimalMvp) LoadFile(ctx context.Context, u string) (int64, error) {
 	m.mu.Lock()
 	m.urls = append(m.urls, u)
 	m.mu.Unlock()
-	return nil
+	return 1, nil
 }
 func (m *minimalMvp) Stop() error { return nil }
 func (m *minimalMvp) SetProperty(n string, v any) {
@@ -51,12 +53,12 @@ func (m *minimalMvp) GetProperty(n string) (any, error) {
 	defer m.mu.Unlock()
 	return m.props[n], nil
 }
-func (m *minimalMvp) SubAdd(u string) error       { return nil }
-func (m *minimalMvp) Keybind(key, cmd string)     {}
-func (m *minimalMvp) Command(args ...any) error   { return nil }
-func (m *minimalMvp) Incarnation() int            { return 1 }
-func (m *minimalMvp) Screenshot(dir string) error { return nil }
-func (m *minimalMvp) Observe(name string) error   { return nil }
+func (m *minimalMvp) SubAdd(u string) error                 { return nil }
+func (m *minimalMvp) Keybind(key, cmd string)               {}
+func (m *minimalMvp) Command(args ...any) error             { return nil }
+func (m *minimalMvp) Incarnation() int                      { return 1 }
+func (m *minimalMvp) Screenshot(dir string) (string, error) { return dir + "/shot.png", nil }
+func (m *minimalMvp) Observe(name string) error             { return nil }
 func (m *minimalMvp) ShowText(t string, ms, level int) {
 }
 func (m *minimalMvp) Alive() bool { return true }
@@ -447,5 +449,129 @@ func TestSessionDisconnectReconnect(t *testing.T) {
 	}
 	if !strings.Contains(logBuf.String(), "connecting to") {
 		t.Errorf("reconnect did not log a new attempt:\n%s", logBuf.String())
+	}
+}
+
+// The volume memory as wired in main: the remembered volume/mute are restored
+// on the next playback, and config.json is written only when the player commits
+// (end of playback / mpv exit / app exit) — not on every change.
+func TestVolumeMemoryEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	media := filepath.Join(dir, "movie.mkv")
+	if err := os.WriteFile(media, []byte("not really a movie"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := DefaultSettings()
+	s.RememberVolume = true
+	s.LastVolume, s.LastMuted = 37, true
+	if err := s.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	ts := playServer(t)
+	c := jfin.New(ts.URL, "dev", "d1", "1", false)
+	c.Token, c.UserID = "tok", "u"
+	lg := log.New(io.Discard, "", 0)
+	mem := volumeMemory(&s, cfgPath, lg)
+	pl := player.New(newMinimalMvp(), lg)
+	pl.SetOptions(playerOptions(&s))
+	pl.SetVolumeMemory(mem)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pl.Start(ctx)
+
+	// The state we would restore.
+	if got := mem.Get(); got.Volume != 37 || !got.Mute {
+		t.Errorf("restored state = %+v, want {37 true}", got)
+	}
+
+	read := func() Settings {
+		t.Helper()
+		var r Settings
+		if err := r.Load(cfgPath); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	// A change is recorded but not written: config.json is untouched.
+	mem.Record(player.VolumeState{Volume: 64, Mute: false})
+	if got := read().LastVolume; got != 37 {
+		t.Errorf("config changed without a commit: last_volume = %d", got)
+	}
+
+	// Commit writes once, and is a no-op when nothing changed.
+	mem.Commit()
+	if got := read(); got.LastVolume != 64 || got.LastMuted {
+		t.Errorf("after commit: volume=%d muted=%v, want 64/false", got.LastVolume, got.LastMuted)
+	}
+	before := cfgModTime(t, cfgPath)
+	mem.Commit() // nothing new recorded
+	if cfgModTime(t, cfgPath) != before {
+		t.Error("a commit with no change rewrote the file")
+	}
+
+	// With the toggle off the getter reports nothing to restore.
+	s.RememberVolume = false
+	if got := mem.Get(); got.Volume != 0 || got.Mute {
+		t.Errorf("getter with remember off = %+v, want empty", got)
+	}
+}
+
+func cfgModTime(t *testing.T, path string) time.Time {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.ModTime()
+}
+
+// The OSD-editable settings must survive the options → settings write-back, or
+// a change made in the menu would be lost on the next start.
+func TestOSDSettingsWriteBack(t *testing.T) {
+	s := DefaultSettings()
+	before := s
+
+	applyOptionsToSettings(&s, func() player.Options {
+		o := playerOptionsLocked(&before)
+		o.LocalKbps = 3000
+		o.AlwaysTranscode = true
+		o.TranscodeH265 = true
+		o.ForceH264 = true
+		o.IdleStop = false
+		o.IdleStopAfter = 6 * 60 * 60 * 1e9
+		o.LogLevel = "debug"
+		o.SanitizeOutput = false
+		o.SeekLeft, o.SeekRight = -15, 15
+		return o
+	}())
+
+	checks := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"local_kbps", s.LocalKbps, 3000},
+		{"always_transcode", s.AlwaysTranscode, true},
+		{"transcode_h265", s.TranscodeH265, true},
+		{"force_h264", s.ForceH264, true},
+		{"idle_stop", s.IdleStop, false},
+		{"idle_delay_s", s.IdleDelayS, 21600},
+		{"log_level", s.LogLevel, "debug"},
+		{"sanitize_output", s.SanitizeOutput, false},
+		{"seek_left", s.SeekLeft, -15.0},
+		{"seek_right", s.SeekRight, 15.0},
+	}
+	for _, c := range checks {
+		if fmt.Sprint(c.got) != fmt.Sprint(c.want) {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+	// And the media pipeline picks the new values up for the next play.
+	mc := mediaConfig(&s)
+	if mc.LocalKbps != 3000 || !mc.AlwaysTranscode || !mc.TranscodeH265 || !mc.ForceH264 {
+		t.Errorf("media config did not follow the OSD change: %+v", mc)
 	}
 }

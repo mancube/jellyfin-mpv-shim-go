@@ -8,6 +8,7 @@ package player
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"mpv-shim/jfin"
@@ -25,13 +26,12 @@ type menuFrame struct {
 }
 
 type menu struct {
-	p          *Player
-	mu         sync.Mutex // guards the menu state only; never held across p.mu
-	shown      bool
-	mouseBack  bool
-	prefsTitle string // which preferences frame we are in, for re-rendering
-	stacks     []menuFrame
-	frame      menuFrame
+	p         *Player
+	mu        sync.Mutex // guards the menu state only; never held across p.mu
+	shown     bool
+	mouseBack bool
+	stacks    []menuFrame
+	frame     menuFrame
 	// saved OSD properties, restored on hide
 	savedColor       string
 	savedFontSize    int
@@ -71,6 +71,21 @@ func (m *menu) mouseClick() {
 		return
 	}
 	m.Action("ok")
+}
+
+// settingKey is the identity of a menu row for "keep the cursor here": the
+// label without its state marker ("✔ ") and without the value after a colon
+// ("Stop When Idle: 6h" → "Stop When Idle"). Two renderings of the same setting
+// therefore compare equal even when the value or the checkmark changed.
+func settingKey(label string) string {
+	label = strings.TrimLeft(label, " ")
+	for _, mark := range []string{"✔ ", "✖ ", "• "} {
+		label = strings.TrimPrefix(label, mark)
+	}
+	if i := strings.Index(label, ":"); i >= 0 {
+		label = label[:i]
+	}
+	return strings.TrimSpace(label)
 }
 
 // Shown reports whether the menu is open (own lock: callers may hold p.mu).
@@ -249,16 +264,29 @@ func (m *menu) push(title string, entries []menuEntry, selected int) {
 }
 
 // replaceFrame redraws the *current* page with new entries, keeping the parent
-// link. A settings change re-renders the preferences page this way, so "back"
-// always walks one level up the tree instead of hopping to a duplicate of the
-// page we were already on.
-func (m *menu) replaceFrame(title string, entries []menuEntry) {
+// link — so "back" always walks one level up the tree instead of hopping to a
+// duplicate of the page we were already on — and puts the cursor back on the
+// row it was on (matched by setting, not by the whole label, because a row's
+// checkmark or value may have just changed). keep < 0 means "top of the page".
+func (m *menu) replaceFrame(title string, entries []menuEntry, keep int) {
 	m.mu.Lock()
 	if !m.shown {
 		m.mu.Unlock()
 		return
 	}
-	m.frame = menuFrame{title: title, entries: entries, selected: 0}
+	sel := 0
+	if keep >= 0 && keep < len(m.frame.entries) {
+		// Match on the setting, not the whole label: a row gains or loses its
+		// "✔" and its value ("Stop When Idle: 6h" → "15m") when it changes.
+		want := settingKey(m.frame.entries[keep].label)
+		for i, e := range entries {
+			if settingKey(e.label) == want {
+				sel = i
+				break
+			}
+		}
+	}
+	m.frame = menuFrame{title: title, entries: entries, selected: sel}
 	m.mouseBack = false
 	m.mu.Unlock()
 	m.refresh()

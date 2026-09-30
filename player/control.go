@@ -290,6 +290,7 @@ func (p *Player) SetVolume(pct int) {
 		}
 	}
 	p.mpv.SetProperty("volume", pct)
+	recordVolume(pct, false)
 	p.touchLocked()
 	p.reportLocked()
 }
@@ -298,6 +299,12 @@ func (p *Player) SetVolume(pct int) {
 func (p *Player) GetVolume() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.volumeLocked()
+}
+
+// volumeLocked is GetVolume for callers that already hold p.mu (the mutex is
+// not reentrant).
+func (p *Player) volumeLocked() int {
 	if x, err := p.mpv.GetProperty("volume"); err == nil {
 		if f, ok := x.(float64); ok {
 			return int(f)
@@ -312,6 +319,7 @@ func (p *Player) SetMute(mute bool) {
 	defer p.mu.Unlock()
 	p.mpv.SetProperty("mute", mute)
 	p.lastMute = mute
+	recordVolume(p.volumeLocked(), mute)
 	p.touchLocked()
 	p.reportLocked()
 }
@@ -464,20 +472,25 @@ func (p *Player) ToggleMute() {
 	}
 }
 
-// Screenshot writes a frame to ScreenshotDir (remote TakeScreenshot).
+// Screenshot writes a frame to ScreenshotDir (the `s` key, the OSD menu row
+// and the remote's TakeScreenshot). Shows where the file went, since the
+// default directory is in the config dir, not next to the video.
 func (p *Player) Screenshot() {
 	p.mu.Lock()
 	dir := p.ScreenshotDir
 	p.mu.Unlock()
 	if dir == "" {
-		p.log.Printf("screenshot: no directory configured")
+		p.log.Printf("screenshot: no screenshot_dir configured")
 		return
 	}
-	if err := p.mpv.Screenshot(dir); err != nil {
+	path, err := p.mpv.Screenshot(dir)
+	if err != nil {
 		p.log.Printf("screenshot: %v", err)
+		p.mpv.ShowText("Screenshot failed", 3000, 1)
 		return
 	}
-	p.mpv.ShowText("Screenshot saved", 2000, 1)
+	p.log.Printf("screenshot saved: %s", path)
+	p.mpv.ShowText("Saved "+path, 3000, 1)
 }
 
 // WatchedSkip marks the current item watched and plays the next one

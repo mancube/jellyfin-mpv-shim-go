@@ -171,12 +171,36 @@ terminal.
 | `f` | fullscreen | `ESC` | leave fullscreen / close the menu |
 | `q` | stop | `<` `>` | previous / next item |
 | `w` | mark watched + next | `u` | stop + mark unwatched |
-| `s` | screenshot | | |
+| `s` | screenshot (saved to `screenshot_dir`, path shown in the OSD) | | |
 
 The OSD menu also has **Video Preferences** and **Player Preferences**
 sub-menus (transcode quality, subtitle size/colour/position, HDR/Hi10p/DVR
-toggles, auto-play, fullscreen, OSC, intro skipping …). Changes apply
-immediately and are written back to `config.json`.
+toggles, auto-play, fullscreen, OSC, mouse menu, *remember volume & mute*, intro
+skipping …). Changes apply immediately and are written back to `config.json`; the cursor
+stays on the row you changed, so you can walk the list with the remote without
+losing your place.
+
+Changing a **transcode** setting (local or remote bitrate, disable direct play,
+HEVC/H.264, Hi10p/HDR/Dolby Vision, direct paths) while something is playing
+**re-requests the stream from the server at the new quality and resumes from the
+current position** — you do not have to wait for the next item.
+
+**Video Preferences** — remote *and* local transcode quality, transcode
+Hi10p / HDR / Dolby Vision, direct paths, disable direct play, allow HEVC /
+force H.264 when transcoding.
+
+**Player Preferences** is an index of sub-pages, so no page outgrows the window:
+
+- *Playback* — auto play, auto fullscreen, media-key seek, web seek preference,
+  **seek steps** (←/→ and ↑/↓), remember volume, **stop when idle**
+  (off / 15 min / 1 h / 3 h / 6 h / 24 h)
+- *Subtitles* — size, position, colour
+- *Intro & Credits* — always/ask to skip intros and credits
+- *System* — OSC, mouse menu, log file, **log level**, redact tokens, update check
+
+Settings that stay in `config.json` only (too fiddly for a menu): `key_bindings`,
+`lang_filter_*` / `language_config`, `path_substitutions`, `update_url`,
+`health_check_interval`, `connect_retry_mins`, `screenshot_dir`.
 
 ### Tray menu
 
@@ -209,6 +233,8 @@ dot: green connected, amber reconnecting, grey offline.
 | `log_level` | `info` | mpv `--msg-level` (quiet/error/warn/info/debug) |
 | `write_log` | false | also append to `<config dir>/mpv-shim.log` |
 | `media_keys` | true | let mpv handle media keys |
+| `remember_volume` | true | restore the volume **and mute state** you last used at the next playback start |
+| `last_volume` / `last_muted` | — | written automatically, and only when playback ends, mpv exits or the app quits |
 | `key_bindings` | upstream defaults | `{"<mpv key>": "<action>"}`; `""` unbinds a key |
 | `seek_up` / `seek_down` | 60 / -60 | arrow-key seek steps (seconds) |
 | `seek_left` / `seek_right` | -5 / 5 | horizontal seek steps |

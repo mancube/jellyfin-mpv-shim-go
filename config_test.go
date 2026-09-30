@@ -157,3 +157,37 @@ func TestNewSettingsRoundTrip(t *testing.T) {
 		t.Errorf("SubPosition default = %q", fresh.SubPosition())
 	}
 }
+
+// remember_volume defaults on, last_volume round-trips, and the toggle is a
+// plain bool in the config.
+func TestRememberVolumeConfig(t *testing.T) {
+	s := DefaultSettings()
+	if !s.RememberVolume {
+		t.Error("remember_volume should default to true")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	s.LastVolume = 42
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	var got Settings
+	if err := got.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if !got.RememberVolume || got.LastVolume != 42 {
+		t.Errorf("round trip: remember=%v last=%d", got.RememberVolume, got.LastVolume)
+	}
+	// An older config without the key keeps the default on.
+	legacy := filepath.Join(dir, "legacy.json")
+	if err := os.WriteFile(legacy, []byte(`{"server":"http://x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var old Settings
+	if err := old.Load(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if !old.RememberVolume {
+		t.Error("a config without remember_volume should still default to true")
+	}
+}
