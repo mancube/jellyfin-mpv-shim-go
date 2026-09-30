@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"mpv-shim/jfin"
 )
 
 // Options mirrors the subset of upstream's settings the player cares about.
@@ -200,6 +202,11 @@ func (p *Player) noteProfileChange(before string) func() {
 // SetProfileChangeHook installs the callback for "the transcode profile
 // changed" (main re-requests the stream).
 func (p *Player) SetProfileChangeHook(f func()) { p.onProfileChange = f }
+
+// SetLiveConfig installs the callback that hands out the current media config
+// (the preference menus change the settings behind our back). Every load
+// re-reads it, so a restart asks the server for the profile that is set now.
+func (p *Player) SetLiveConfig(f func() jfin.MediaConfig) { p.liveCfg = f }
 
 // SetSaveFunc installs the callback the preference menus use to persist a
 // settings change. It receives the new options, because it is called with

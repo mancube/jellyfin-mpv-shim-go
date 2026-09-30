@@ -559,6 +559,34 @@ func TestEventHookDoesNotBlockOnPlayerLock(t *testing.T) {
 	h.pl.mu.Unlock()
 }
 
+// A re-request must ask the server with the profile that is set *now*: the
+// item carries the config it was built with, so without the live config a
+// profile change would just get the same stream back.
+func TestRestartUsesTheCurrentConfig(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	m, err := jfin.NewMedia(ctx, h.c, cfg(), []string{"a"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	if m.Cfg.RemoteKbps != 25000 {
+		t.Fatalf("play used RemoteKbps = %d", m.Cfg.RemoteKbps)
+	}
+	// The preference menus change the settings behind our back.
+	h.pl.SetLiveConfig(func() jfin.MediaConfig {
+		return jfin.MediaConfig{LocalKbps: 10000, RemoteKbps: 2000, AlwaysTranscode: true}
+	})
+	if !h.pl.Restart() {
+		t.Fatal("Restart returned false while playing")
+	}
+	if m.Cfg.RemoteKbps != 2000 || !m.Cfg.AlwaysTranscode {
+		t.Errorf("re-request used %+v, want the current config (2000 kbps, always transcode)", m.Cfg)
+	}
+}
+
 func TestCrashRestart(t *testing.T) {
 	h := setup(t)
 	ctx := context.Background()

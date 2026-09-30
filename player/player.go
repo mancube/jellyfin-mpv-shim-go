@@ -69,6 +69,10 @@ type Player struct {
 	// onProfileChange is called (without the lock) when a preference changed
 	// what we ask the server for.
 	onProfileChange func()
+	// liveCfg returns the media config to re-request with. A Media captures
+	// the config it was built with, so without this a profile change would
+	// re-request the very stream the user just turned off.
+	liveCfg func() jfin.MediaConfig
 
 	// update check (upstream update_check.py)
 	updateURL     string
@@ -290,6 +294,12 @@ func (p *Player) playLocked(m *jfin.Media, offset float64) error {
 	v := m.Video
 	if v == nil {
 		return errors.New("player: media has no video")
+	}
+	// The item carries the config it was first built with; the settings may
+	// have changed since (a transcode profile change is exactly this), and a
+	// re-request has to use the current one or it gets the same stream back.
+	if p.liveCfg != nil {
+		m.Cfg = p.liveCfg()
 	}
 	p.shouldSendTimeline = false
 	p.start = time.Now()

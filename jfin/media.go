@@ -239,7 +239,7 @@ func (v *Video) PlaybackURL(ctx context.Context) (string, error) {
 		RemoteKbps:           m.Cfg.RemoteKbps,
 		TranscodeH265:        m.Cfg.TranscodeH265,
 		ForceH264:            m.Cfg.ForceH264,
-		AlwaysTranscode:      m.Cfg.AlwaysTranscode,
+		ForceTranscode:       m.Cfg.AlwaysTranscode,
 		TranscodeHi10p:       m.Cfg.TranscodeHi10p,
 		TranscodeHDR:         m.Cfg.TranscodeHDR,
 		TranscodeDolbyVision: m.Cfg.TranscodeDolbyVision,

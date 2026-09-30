@@ -500,6 +500,11 @@ func newSession(s *Settings, a jfin.Account, lg *log.Logger, logs *ui.LogRing, c
 	// quality / codec knobs / language rules while we run.
 	// Built per play (see below): a closure so preference changes apply now.
 	liveMediaConfig := func() jfin.MediaConfig { return mediaConfig(s) }
+	// A re-request must ask for the profile that is set *now*: the preference
+	// menus write the new settings into s, and the item would otherwise keep
+	// the config it was first built with — so a profile change would ask for
+	// the very stream the user just turned off.
+	pl.SetLiveConfig(liveMediaConfig)
 	ws.On("Play", func(ctx context.Context, data json.RawMessage) {
 		go handlePlay(ctx, client, pl, liveMediaConfig(), data) // don't block the WS read loop
 	})
