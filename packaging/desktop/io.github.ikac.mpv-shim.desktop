@@ -6,7 +6,10 @@ GenericName=Jellyfin Video Player
 Comment=Cast Jellyfin video to a local mpv window
 Exec=mpv-shim
 Icon=io.github.ikac.mpv-shim
-Terminal=true
+# No console window: without a terminal the app runs headless (tray + OSD menu,
+# and the tray's "Show Console" opens a status window on demand). The TUI is
+# what you get when you run `mpv-shim` in a real terminal.
+Terminal=false
 Categories=AudioVideo;Player;
 Keywords=Jellyfin;mpv;cast;streaming;video;
 StartupNotify=false

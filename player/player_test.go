@@ -1210,6 +1210,37 @@ func TestEndFileStopDoesNotAdvanceQueue(t *testing.T) {
 	}
 }
 
+// Regression: the queue must advance on `eof-reached`, NOT on end-file. Real
+// mpv with keep-open=yes (which is exactly the "there is a next episode" case)
+// pauses at the last frame and never emits end-file at all — verified against
+// mpv 0.41. Upstream's observer is commented "Fires between episodes".
+func TestEOFReachedAdvancesQueue(t *testing.T) {
+	h := setup(t)
+	ctx := context.Background()
+	m, err := jfin.NewMedia(ctx, h.c, cfg(), []string{"a", "b"}, 0, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewMedia: %v", err)
+	}
+	if err := h.pl.Play(m, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	waitFor(t, "start a", func() bool {
+		p, _, _, _ := h.recs.snapshot()
+		return len(p) == 1
+	})
+
+	// What mpv really sends at the end of a file with keep-open=yes.
+	h.fm.changeProp("eof-reached", true)
+
+	waitFor(t, "start b", func() bool {
+		p, _, _, _ := h.recs.snapshot()
+		return len(p) == 2
+	})
+	if h.fm.numLoads() != 2 || !strings.Contains(h.fm.loadsTail(), "/b") {
+		t.Errorf("loads = %v, want the 2nd load of /b", h.fm.loadsTail())
+	}
+}
+
 // A crash loop (mpv dies again and again without playing) must give up.
 func TestCrashLoopGivesUp(t *testing.T) {
 	h := setup(t)

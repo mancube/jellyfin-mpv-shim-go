@@ -278,8 +278,10 @@ const maxCrashRestarts = 3
 // settings.local_kbps-derived timing; 15 s matches its UX for most content.
 const introSkipWindow = 15 * time.Second
 
-// observedProps are the mpv properties we watch for immediate UI feedback.
-var observedProps = []string{"pause", "mute", "volume", "seeking", "time-pos", "aid", "sid"}
+// observedProps are the mpv properties we watch for immediate UI feedback,
+// plus `eof-reached`: the queue advance trigger (upstream's eof-reached
+// observer, "Fires between episodes").
+var observedProps = []string{"pause", "mute", "volume", "seeking", "time-pos", "aid", "sid", "eof-reached"}
 
 // Play loads the media's video into mpv and reports session start.
 // Port of upstream play + _play_media.
@@ -606,7 +608,9 @@ func (p *Player) eventLoop() {
 
 // onEndFileLocked routes an end-file by reason. Only "eof" (the file really
 // played out) marks watched and advances the queue; "stop"/"quit" means the
-// user or mpv ended playback, so we just close out the session.
+// user or mpv ended playback, so we just close out the session. The main
+// between-episodes trigger is `eof-reached` (see onPropertyChange): with
+// keep-open=yes mpv pauses at the last frame and sends no end-file at all.
 func (p *Player) onEndFileLocked(reason string) {
 	switch reason {
 	case "eof":
