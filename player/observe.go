@@ -151,6 +151,18 @@ func (p *Player) onPropertyChange(prop string, data json.RawMessage) {
 		if !p.trackChangeLocked(prop, data) {
 			return
 		}
+	case "eof-reached":
+		// The episode finished: mark watched and advance the queue. This, not
+		// end-file, is what fires between episodes — we set keep-open=yes
+		// exactly when there is a next item, and mpv then pauses at the last
+		// frame and never sends end-file (verified on 0.41). end-file still
+		// covers the last item, where keep-open is off.
+		var v bool
+		if json.Unmarshal(data, &v) != nil || !v {
+			return
+		}
+		p.handleEndFileLocked()
+		return
 	case "time-pos":
 		var v float64
 		if json.Unmarshal(data, &v) != nil {
