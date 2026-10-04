@@ -8,7 +8,7 @@ set -eu
 
 APP="mpv-shim.app"
 BUNDLE_ID="io.github.ikac.mpv-shim"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.0.1}"
 ARCH="${1:-$(uname -m)}"
 
 cd "$(dirname "$0")/../.."
